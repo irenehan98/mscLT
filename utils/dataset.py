@@ -106,6 +106,20 @@ class DeepScores:
                 parsed_dict[key] = value
         return parsed_dict
 
+    @staticmethod
+    def moderate_bbox(bbox, img_size):
+        x0, y0, x1, y1 = bbox
+        img_width, img_height = img_size
+
+        if x0 == x1:
+            x0 = max(0, x0 - 1)
+            x1 = min(img_width, x1 + 1)
+        if y0 == y1:
+            y0 = max(0, y0 - 1)
+            y1 = min(img_height, y1 + 1)
+
+        return [x0, y0, x1, y1]
+
     def load_annotations(self, annotation_set_filter=None):
         print("loading annotations...")
         start_time = time()
@@ -142,7 +156,7 @@ class DeepScores:
                        'comments': []}
 
         for k, v in data['annotations'].items():
-            # TODO find better alternative (from cat_info?)
+            # TODO find better alternative (e.g. self.cat_info?)
             cat_id = v['cat_id'][annotation_idx]
             cat_inst_count.setdefault(cat_id, 0)
             cat_inst_count[cat_id] += 1
@@ -372,16 +386,6 @@ class DeepScores:
             img.save(path.join(out_dir, datetime.now().strftime('%m-%d_%H%M%S'))
                      + '.png')
 
-    # TODO evaluate if redundant
-    def count_cats(self, annotation_set=None):
-        if annotation_set != 'deepscores' and annotation_set != 'muscima++':
-            return None
-        counter = 0
-        for v in self.cat_info.values():
-            if v['annotation_set'] == annotation_set:
-                counter += 1
-        return counter
-
     def remap_empty_cat_id(self, anns, class_counter, new_mapping=None, starts_from_one=False):
         rev_cat_ctr = None
         if new_mapping is None:
@@ -391,7 +395,7 @@ class DeepScores:
         start_time = time()
 
         if len(new_mapping) <= 0:
-            rev_cat_ctr = self.count_cats(self.chosen_ann_set)
+            rev_cat_ctr = len(self.get_cats())
 
             start = 1 if starts_from_one else 0
             end = len(class_counter) + start
@@ -399,7 +403,6 @@ class DeepScores:
             for i in range(start, end):
                 # print(f"[debug] i: {i}")
                 if i is rev_cat_ctr:
-                    print(f"[debug] i, rev_cat_ctr: {i, rev_cat_ctr}")
                     if i not in class_counter or class_counter[i] == 0:
                         print(f"class id {i} is empty")
                         rev_cat_ctr -= 1
@@ -424,11 +427,12 @@ class DeepScores:
                 ann['category_id'] = new_mapping[cat_id]
                 remap_cnt += 1
 
-        print(f"remapped {remap_cnt} annotations in t={time() - start_time}s")
+        print(f"remapped {remap_cnt} annotations in t={time() - start_time:.6f}s")
         return rev_cat_ctr, new_mapping, anns
 
     def crop_bounding_boxes(self,
-                            img_id,
+                            img,
+                            ann_info,
                             class_counter,
                             out_dir,
                             annotation_set=None,
@@ -445,29 +449,10 @@ class DeepScores:
         else:
             self.chosen_ann_set = self.chosen_ann_set[annotation_set]
 
-        img_info, ann_info = [i[0] for i in
-                              self.get_img_ann_pair(ids=img_id)]
-
-        img_dir = path.join(self.root, 'images')
-        img_fp = path.join(img_dir, img_info['filename'])
-
-        # Remember: PIL Images are in form (h, w, 3)
-        img = Image.open(img_fp)
-        img_width, img_height = img.size
-
         new_anns = []
         # split the gt bounding boxes onto the image
         for ann in ann_info.to_dict('records'):
-            x0, y0, x1, y1 = ann['a_bbox']
-
-            if x0 == x1:
-                x0 = max(0, x0 - 1)
-                x1 = min(img_width, x1 + 1)
-            if y0 == y1:
-                y0 = max(0, y0 - 1)
-                y1 = min(img_height, y1 + 1)
-
-            bbox = [x0, y0, x1, y1]
+            bbox = self.moderate_bbox(ann['a_bbox'], img.size)
 
             last_id += 1
             current_id = last_id
@@ -507,7 +492,7 @@ class DeepScores:
         return last_id, new_anns
 
     def crop_all_to_instances(self,
-                              out_dir=None,  # TODO can't be none
+                              out_dir=None,
                               out_annot='annotations.json',
                               annotation_set=None,
                               bg_opacity=0,
@@ -518,6 +503,8 @@ class DeepScores:
                               class_counter=None,
                               last_id=0):
         # TODO multithreading
+
+        assert out_dir is not None, "out_dir can't be empty"
 
         if class_counter is None:
             class_counter = dict()
@@ -535,7 +522,13 @@ class DeepScores:
             # progress_ctr += 1
 
             img_id = [img_info['id']]
-            last_id, bb_annotations = self.crop_bounding_boxes(img_id, class_counter, out_dir, annotation_set, last_id, bg_opacity, resize=resize, ann_style=ann_style, verbose=verbose, debug=debug)
+
+            img_info, ann_info = [i[0] for i in self.get_img_ann_pair(ids=img_id)]
+
+            img_fp = path.join(self.root, 'images', img_info['filename'])
+            img = Image.open(img_fp)
+
+            last_id, bb_annotations = self.crop_bounding_boxes(img, ann_info, class_counter, out_dir, annotation_set, last_id, bg_opacity, resize=resize, ann_style=ann_style, verbose=verbose, debug=debug)
             annotations.extend(bb_annotations)
 
             if debug:
@@ -547,7 +540,7 @@ class DeepScores:
         class_counter = {i: class_counter[i] for i in class_keys}
         print(f"class_counter: {class_counter}")
 
-        num_classes = self.count_cats(self.chosen_ann_set)
+        num_classes = len(self.get_cats())
 
         if ann_style == "BBN":
             if len(class_counter) < num_classes:
@@ -557,5 +550,5 @@ class DeepScores:
         with open(path.join(self.root, out_annot), 'w') as fp:
             json.dump({'annotations': annotations, 'num_classes': num_classes, "remapped_cat_id": remapped_cat}, fp)
 
-        print(f'done t={time() - start_time}s: total annotation {len(annotations)} with {len(class_counter)} out of {num_classes} classes')
+        print(f'done t={time() - start_time:.6f}s: total annotation {len(annotations)} with {len(class_counter)} out of {num_classes} classes')
         return last_id, class_counter
