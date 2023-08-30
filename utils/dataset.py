@@ -1,3 +1,7 @@
+"""
+partially based on obb_anns (https://github.com/yvan674/obb_anns)
+"""
+
 import json
 from datetime import datetime
 from typing import List
@@ -8,6 +12,37 @@ from PIL import Image, ImageColor, ImageDraw, ImageFont
 import colorcet
 import numpy
 import pandas
+
+
+def crop_object(img, bbox, min_dim, bg_opacity, resize, debug):
+    x0, y0, x1, y1 = bbox
+    width, height = int(x1 - x0), int(y1 - y0)
+    max_width, max_height = img.size
+
+    bg_wdiff, bg_hdiff = max(0, min_dim - width), max(0, min_dim - height)
+    bg_x0, bg_x1 = max(0, x0 - (bg_wdiff / 2)), min(max_width, x1 + (bg_wdiff / 2))
+    bg_y0, bg_y1 = max(0, y0 - (bg_hdiff / 2)), min(max_height, y1 + (bg_hdiff / 2))
+
+    cropped = img.crop((x0, y0, x1, y1))
+    bg_cropped = img.crop((bg_x0, bg_y0, bg_x1, bg_y1))
+    bg_cropped.putalpha(bg_opacity)
+
+    result = Image.new(cropped.mode, bg_cropped.size, (255, 255, 255))
+    result.paste(bg_cropped, (0, 0), bg_cropped)
+    result.paste(cropped, (int(x0 - bg_x0), int(y0 - bg_y0)))
+
+    if resize is not None:
+        result = result.resize(resize)
+
+    if debug is True:
+        print(f"wdiff: {bg_wdiff} hdiff: {bg_hdiff}")
+        print(f"bg: {bg_x0, bg_y0, bg_x1, bg_y1}")
+        print(f"cropped: {cropped.size} bg: {bg_cropped.size}")
+        cropped.show()
+        bg_cropped.show()
+        print(f"result: {result.size}")
+
+    return result
 
 
 class DeepScores:
@@ -92,7 +127,6 @@ class DeepScores:
         else:
             self.chosen_ann_set = self.annotation_sets
             annotation_idx = 0
-
 
         self.cat_info = {int(k): v for k, v in data['categories'].items()}
 
@@ -255,7 +289,6 @@ class DeepScores:
     def visualize(self,
                   img_idx=None,
                   img_id=None,
-                  data_root=None,
                   out_dir=None,
                   annotation_set=None,
                   oriented=True,
@@ -278,13 +311,9 @@ class DeepScores:
                               self.get_img_ann_pair(
                                   idxs=img_idx, ids=img_id)]
 
-        # Get the data_root from the ann_file path if it doesn't exist
-        if data_root is None:
-            data_root = path.split(self.train_ann_file)[0]
-
-        img_dir = path.join(data_root, 'images')
-        seg_dir = path.join(data_root, 'segmentation')
-        inst_dir = path.join(data_root, 'instance')
+        img_dir = path.join(self.root, 'images')
+        seg_dir = path.join(self.root, 'segmentation')
+        inst_dir = path.join(self.root, 'instance')
 
         # Get the actual image filepath and the segmentation filepath
         img_fp = path.join(img_dir, img_info['filename'])
@@ -343,6 +372,190 @@ class DeepScores:
             img.save(path.join(out_dir, datetime.now().strftime('%m-%d_%H%M%S'))
                      + '.png')
 
-    def crop_all_to_instances(self):
-        # TODO
-        return
+    # TODO evaluate if redundant
+    def count_cats(self, annotation_set=None):
+        if annotation_set != 'deepscores' and annotation_set != 'muscima++':
+            return None
+        counter = 0
+        for v in self.cat_info.values():
+            if v['annotation_set'] == annotation_set:
+                counter += 1
+        return counter
+
+    def remap_empty_cat_id(self, anns, class_counter, new_mapping=None, starts_from_one=False):
+        rev_cat_ctr = None
+        if new_mapping is None:
+            new_mapping = dict()
+
+        print("remapping categories...")
+        start_time = time()
+
+        if len(new_mapping) <= 0:
+            rev_cat_ctr = self.count_cats(self.chosen_ann_set)
+
+            start = 1 if starts_from_one else 0
+            end = len(class_counter) + start
+
+            for i in range(start, end):
+                # print(f"[debug] i: {i}")
+                if i is rev_cat_ctr:
+                    print(f"[debug] i, rev_cat_ctr: {i, rev_cat_ctr}")
+                    if i not in class_counter or class_counter[i] == 0:
+                        print(f"class id {i} is empty")
+                        rev_cat_ctr -= 1
+                    break
+
+                if i not in class_counter or class_counter[i] == 0:
+                    print(f"key {i} not in class_counter; rev_cat_ctr: {rev_cat_ctr, rev_cat_ctr in class_counter}")
+                    while rev_cat_ctr not in class_counter or class_counter[rev_cat_ctr] == 0:
+                        rev_cat_ctr -= 1
+                        # print(f"[debug] back_ctr: {rev_cat_ctr}")
+                    print(f"key {rev_cat_ctr} is remapped to {i}")
+                    new_mapping[rev_cat_ctr] = i
+                    rev_cat_ctr -= 1
+            print(f"rev_cat_ctr: {rev_cat_ctr}")
+            print(f"new mapping: {new_mapping}")
+
+        remap_cnt = 0
+        for ann in anns:
+            cat_id = ann['category_id']
+            if cat_id in new_mapping:
+                # print(f"remapping {cat_id} to {new_mapping[cat_id]}")
+                ann['category_id'] = new_mapping[cat_id]
+                remap_cnt += 1
+
+        print(f"remapped {remap_cnt} annotations in t={time() - start_time}s")
+        return rev_cat_ctr, new_mapping, anns
+
+    def crop_bounding_boxes(self,
+                            img_id,
+                            class_counter,
+                            out_dir,
+                            annotation_set=None,
+                            last_id=0,
+                            bg_opacity=0,
+                            min_dim=150,
+                            resize=None,
+                            ann_style=None,
+                            verbose=False,
+                            debug=False):
+
+        if annotation_set is None:
+            self.chosen_ann_set = self.annotation_sets[0]
+        else:
+            self.chosen_ann_set = self.chosen_ann_set[annotation_set]
+
+        img_info, ann_info = [i[0] for i in
+                              self.get_img_ann_pair(ids=img_id)]
+
+        img_dir = path.join(self.root, 'images')
+        img_fp = path.join(img_dir, img_info['filename'])
+
+        # Remember: PIL Images are in form (h, w, 3)
+        img = Image.open(img_fp)
+        img_width, img_height = img.size
+
+        new_anns = []
+        # split the gt bounding boxes onto the image
+        for ann in ann_info.to_dict('records'):
+            x0, y0, x1, y1 = ann['a_bbox']
+
+            if x0 == x1:
+                x0 = max(0, x0 - 1)
+                x1 = min(img_width, x1 + 1)
+            if y0 == y1:
+                y0 = max(0, y0 - 1)
+                y1 = min(img_height, y1 + 1)
+
+            bbox = [x0, y0, x1, y1]
+
+            last_id += 1
+            current_id = last_id
+
+            cat_id = ann['cat_id'][0]
+            name = self.cat_info[cat_id]['name']
+            class_counter.setdefault(cat_id, 0)
+            class_counter[cat_id] += 1
+
+            result = crop_object(img, bbox, min_dim, bg_opacity, resize, debug)
+
+            if verbose:
+                width, height = result.size
+                if width > min_dim or height > min_dim:
+                    print(f"[WARNING] obj {name} has dimension {result.size}")
+
+            out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:06d}') + '.png'
+            result.save(out_fp)
+
+            if ann_style == "BBN":
+                width, height = result.size
+                new_anns.append({
+                    "image_id": current_id,
+                    "im_height": height,
+                    "im_width": width,
+                    "category_id": cat_id,
+                    "fpath": out_fp,
+                })
+
+            if debug is True:
+                result.show()
+                break
+
+        if debug:
+            print(new_anns)
+
+        return last_id, new_anns
+
+    def crop_all_to_instances(self,
+                              out_dir=None,  # TODO can't be none
+                              out_annot='annotations.json',
+                              annotation_set=None,
+                              bg_opacity=0,
+                              ann_style=None,
+                              resize=None,
+                              verbose=False,
+                              debug=False,
+                              class_counter=None,
+                              last_id=0):
+        # TODO multithreading
+
+        if class_counter is None:
+            class_counter = dict()
+
+        print("initiate cropping...")
+        start_time = time()
+
+        annotations = []
+
+        # # TODO make progress visualizer
+        # progress_ctr = 0
+        for img_info in self.img_info:
+            # if progress_ctr % int(len(self.img_info) / 10) == 0:
+            #     print(f"progress: {int(progress_ctr / len(self.img_info) * 100)}%")
+            # progress_ctr += 1
+
+            img_id = [img_info['id']]
+            last_id, bb_annotations = self.crop_bounding_boxes(img_id, class_counter, out_dir, annotation_set, last_id, bg_opacity, resize=resize, ann_style=ann_style, verbose=verbose, debug=debug)
+            annotations.extend(bb_annotations)
+
+            if debug:
+                print(annotations)
+                break
+
+        class_keys = list(class_counter.keys())
+        class_keys.sort()
+        class_counter = {i: class_counter[i] for i in class_keys}
+        print(f"class_counter: {class_counter}")
+
+        num_classes = self.count_cats(self.chosen_ann_set)
+
+        if ann_style == "BBN":
+            if len(class_counter) < num_classes:
+                num_classes, remapped_cat, annotations = self.remap_empty_cat_id(annotations, class_counter)
+
+        # turn into json
+        with open(path.join(self.root, out_annot), 'w') as fp:
+            json.dump({'annotations': annotations, 'num_classes': num_classes, "remapped_cat_id": remapped_cat}, fp)
+
+        print(f'done t={time() - start_time}s: total annotation {len(annotations)} with {len(class_counter)} out of {num_classes} classes')
+        return last_id, class_counter
