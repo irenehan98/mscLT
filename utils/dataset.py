@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import List
 from os import path
+from tqdm import tqdm
 from time import time
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
@@ -93,7 +94,8 @@ class DeepScores:
         information += f"dataset type: {self.dataset_type}\n"
         if self.dataset_info is not None:
             information += f"Num images: {len(self.img_infos)}\n"
-            information += f"Num anns: {len(self.ann_infos)}\n"
+            # TODO count all cat inst cnt for ann count
+            information += f"Num anns: {len(self.ann_infos) if self.dataset_type == 'dense' else '-'}\n"
             information += f"Num cats: {len(self.cat_infos)}\n"
             information += f"selected cats: {len(self.get_cats())}"
         else:
@@ -137,7 +139,8 @@ class DeepScores:
         return [x0, y0, x1, y1]
 
     @staticmethod
-    def load_annotation_file(ann_fp, cat_idx):
+    def load_annotation_file(ann_fp, cat_idx, with_ann_df=True):
+        start_time = time()
         with open(ann_fp, 'r') as ann_file:
             data = json.load(ann_file)
 
@@ -162,19 +165,24 @@ class DeepScores:
             cat_inst_count.setdefault(cat_id, 0)
             cat_inst_count[cat_id] += 1
 
-            ann_ids.append(int(k))
-            annotations['a_bbox'].append(v['a_bbox'])
-            annotations['o_bbox'].append(v['o_bbox'])
-            annotations['cat_id'].append(v['cat_id'])
-            annotations['area'].append(v['area'])
-            annotations['img_id'].append(v['img_id'])
-            annotations['comments'].append(v['comments'])
+            if with_ann_df is True:
+                ann_ids.append(int(k))
+                annotations['a_bbox'].append(v['a_bbox'])
+                annotations['o_bbox'].append(v['o_bbox'])
+                annotations['cat_id'].append(v['cat_id'])
+                annotations['area'].append(v['area'])
+                annotations['img_id'].append(v['img_id'])
+                annotations['comments'].append(v['comments'])
 
-        ann_df = pandas.DataFrame(annotations, ann_ids)
+        if with_ann_df is True:
+            ann_df = pandas.DataFrame(annotations, ann_ids)
+        else:
+            ann_df = None
 
         # class_keys = list(cat_inst_count.keys())
         # self.cat_instance_count = {i: cat_inst_count[i] for i in class_keys}
 
+        # print(f"file {ann_fp} loaded in {time() - start_time:.6f}s")
         return img_infos, img_idx_lookup, cat_inst_count, ann_df
 
     def load_annotations(self, annotation_set_filter=None):
@@ -207,21 +215,30 @@ class DeepScores:
         self.cat_instance_count = dict()
         for cat in self.get_cats():
             self.cat_instance_count.setdefault(cat, 0)
+
+        print(f"info loaded in {time() - start_time:.6f}s..")
         # -- end of load once --
 
         self.img_infos = []
 
-        dataframes = []
-        for train_ann_file in self.train_ann_files:
-            img_infos, img_idx_lookup, cat_inst_cnt, ann_df = self.load_annotation_file(train_ann_file, cat_idx)
-
+        # press F for my 32gb ram it ain't enough for multithreading
+        if self.dataset_type == 'dense':
+            img_infos, img_idx_lookup, cat_inst_cnt, ann_df = self.load_annotation_file(ref_file, cat_idx)
             self.img_idx_lookup.update(img_idx_lookup)
             for k, v in cat_inst_cnt.items():
                 self.cat_instance_count[int(k)] += v
             self.img_infos.extend(img_infos)
-            dataframes.append(ann_df)
-        # print(f"concatenating dataframes of size: {[len(df.index) for df in dataframes]}")
-        self.ann_infos = pandas.concat(dataframes)
+            self.ann_infos = ann_df
+        elif self.dataset_type == 'complete':
+            files = self.train_ann_files + self.test_ann_files
+            for ann_file in tqdm(files, 'file processed: ', unit='file'):
+                img_infos, img_idx_lookup, cat_inst_cnt, ann_df = self.load_annotation_file(ann_file, cat_idx, with_ann_df=False)
+                self.img_idx_lookup.update(img_idx_lookup)
+                for k, v in cat_inst_cnt.items():
+                    self.cat_instance_count[int(k)] += v
+                self.img_infos.extend(img_infos)
+
+        # TODO handle complete dataset ann_infos usage
 
         print("--- ANNOTATION INFO ---")
         print(repr(self))
