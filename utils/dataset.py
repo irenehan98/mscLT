@@ -66,23 +66,24 @@ class DeepScores:
         # TODO: assert dataset exists
         # TODO: find out if deepscores train and test data overlaps
         self.validate_type(dataset_type)
+
+        self.train_ann_file = []
+        self.test_ann_file = []
         if dataset_type == 'dense':
-            self.train_ann_file = path.join(root_dir, "deepscores_train.json")  # default ann_file
-            self.test_ann_file = path.join(root_dir, "deepscores_test.json")
+            self.train_ann_file.append(path.join(root_dir, "deepscores_train.json"))  # default ann_file
+            self.test_ann_file.append(path.join(root_dir, "deepscores_test.json"))
         elif dataset_type == 'complete':
-            self.train_ann_file = []
-            self.test_ann_file = []
             for i in itertools.count():
                 test_fp = path.join(root_dir, f"deepscores-complete-{i}_test.json")
                 train_fp = path.join(root_dir, f"deepscores-complete-{i}_train.json")
-
-                if not path.isfile(train_fp) and not path.isfile(test_fp):
-                    break
 
                 if path.isfile(train_fp):
                     self.train_ann_file.append(train_fp)
                 if path.isfile(test_fp):
                     self.test_ann_file.append(test_fp)
+
+                if not path.isfile(train_fp) and not path.isfile(test_fp):
+                    break
 
         print("initialization done in {:.6f}s".format(time() - start_time))
 
@@ -112,11 +113,6 @@ class DeepScores:
 
     @staticmethod
     def parse_comments(comment):
-        """Parses the comment field of an annotation.
-
-        :returns dictionary with every comment name as keys
-        :rtype: dict
-        """
         parsed_dict = dict()
         for co in comment.split(";"):
             if len(co.split(":")) > 1:
@@ -184,7 +180,7 @@ class DeepScores:
         start_time = time()
 
         # -- only need to load once --
-        ref_file = self.train_ann_file if type(self.train_ann_file) is str else self.test_ann_file[0]
+        ref_file = self.test_ann_file[0]
 
         with open(ref_file, 'r') as ann_file:
             data = json.load(ann_file)
@@ -210,7 +206,7 @@ class DeepScores:
         # -- end of load once --
 
         # TODO support complete version
-        img_infos, img_idx_lookup, cat_inst_cnt, ann_df = self.load_annotation_file(self.train_ann_file, cat_idx)
+        img_infos, img_idx_lookup, cat_inst_cnt, ann_df = self.load_annotation_file(self.train_ann_file[0], cat_idx)
 
         self.img_idx_lookup.update(img_idx_lookup)
         self.cat_instance_count.update(cat_inst_cnt)
