@@ -1,7 +1,7 @@
 """
 partially based on obb_anns (https://github.com/yvan674/obb_anns)
 """
-
+import itertools
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -55,21 +55,34 @@ class DeepScores:
         self.annotation_sets = None
         self.chosen_ann_set = None  # type: None or List[str]
         self.cat_instance_count = None
-        self.ann_info = None
+        self.ann_info = None  # type pd dataFrame
         self.cat_info = None
-        self.img_info = None  # img_info has 'id' 'filename' 'width' 'height' 'ann_ids'
-        self.img_idx_lookup = dict()
+        self.img_infos = None  # img_info has 'id' 'filename' 'width' 'height' 'ann_ids'
+        self.img_idx_lookup = dict()  # lookup table used to figure out the index in img_info of image based on their img_id
         self.ann_ids = []
 
         self.root = root_dir
+        self.dataset_type = dataset_type
         # TODO: assert dataset exists
         # TODO: find out if deepscores train and test data overlaps
+        self.validate_type(dataset_type)
         if dataset_type == 'dense':
             self.train_ann_file = path.join(root_dir, "deepscores_train.json")  # default ann_file
             self.test_ann_file = path.join(root_dir, "deepscores_test.json")
-        else:
-            print(f"unsupported type: {dataset_type}")
-            return
+        elif dataset_type == 'complete':
+            self.train_ann_file = []
+            self.test_ann_file = []
+            for i in itertools.count():
+                test_fp = path.join(root_dir, f"deepscores-complete-{i}_test.json")
+                train_fp = path.join(root_dir, f"deepscores-complete-{i}_train.json")
+
+                if not path.isfile(train_fp) and not path.isfile(test_fp):
+                    break
+
+                if path.isfile(train_fp):
+                    self.train_ann_file.append(train_fp)
+                if path.isfile(test_fp):
+                    self.test_ann_file.append(test_fp)
 
         print("initialization done in {:.6f}s".format(time() - start_time))
 
@@ -77,7 +90,7 @@ class DeepScores:
         information = "DeepScore Dataset Annotation\n"
         information += f"root file: {self.root}\n"
         if self.dataset_info is not None:
-            information += f"Num images: {len(self.img_info)}\n"
+            information += f"Num images: {len(self.img_infos)}\n"
             information += f"Num anns: {len(self.ann_info)}\n"
             information += f"Num cats: {len(self.cat_info)}"
         else:
@@ -85,13 +98,17 @@ class DeepScores:
         return information
 
     def __len__(self):
-        return 0 if self.img_info is None else len(self.img_info)
+        return 0 if self.img_infos is None else len(self.img_infos)
 
     @staticmethod
     def _xor_args(m, n):
         only_one_arg = ((m is not None and n is None)
                         or (m is None and n is not None))
         assert only_one_arg, 'Only one type of request can be done at a time'
+
+    @staticmethod
+    def validate_type(dataset_type):
+        assert dataset_type == 'dense' or dataset_type == 'complete', f"unsupported type: {dataset_type}"
 
     @staticmethod
     def parse_comments(comment):
@@ -121,12 +138,56 @@ class DeepScores:
 
         return [x0, y0, x1, y1]
 
+    @staticmethod
+    def load_annotation_file(ann_fp, cat_idx):
+        with open(ann_fp, 'r') as ann_fp:
+            data = json.load(ann_fp)
+
+        img_infos = data['images']
+
+        img_idx_lookup = dict()
+        for i, img in enumerate(img_infos):
+            img_idx_lookup[int(img['id'])] = i
+
+        ann_ids = []
+        annotations = {'a_bbox': [],
+                       'o_bbox': [],
+                       'cat_id': [],
+                       'area': [],
+                       'img_id': [],
+                       'comments': []}
+
+        cat_inst_count = dict()
+        for k, v in data['annotations'].items():
+            # TODO find better alternative (e.g. see self.cat_info?)
+            cat_id = v['cat_id'][cat_idx]
+            cat_inst_count.setdefault(cat_id, 0)
+            cat_inst_count[cat_id] += 1
+
+            ann_ids.append(int(k))
+            annotations['a_bbox'].append(v['a_bbox'])
+            annotations['o_bbox'].append(v['o_bbox'])
+            annotations['cat_id'].append(v['cat_id'])
+            annotations['area'].append(v['area'])
+            annotations['img_id'].append(v['img_id'])
+            annotations['comments'].append(v['comments'])
+
+        dataframe = pandas.DataFrame(annotations, ann_ids)
+
+        # class_keys = list(cat_inst_count.keys())
+        # self.cat_instance_count = {i: cat_inst_count[i] for i in class_keys}
+
+        return img_infos, img_idx_lookup, cat_inst_count, dataframe
+
     def load_annotations(self, annotation_set_filter=None):
         print("loading annotations...")
         start_time = time()
 
-        with open(self.train_ann_file, 'r') as train_ann_file:
-            data = json.load(train_ann_file)
+        # -- only need to load once --
+        ref_file = self.train_ann_file if type(self.train_ann_file) is str else self.test_ann_file[0]
+
+        with open(ref_file, 'r') as ann_file:
+            data = json.load(ann_file)
 
         self.dataset_info = data['info']
         self.annotation_sets = data['annotation_sets']
@@ -138,56 +199,32 @@ class DeepScores:
                 f"{annotation_set_filter} is not a in the available " \
                 f"annotations sets."
             self.chosen_ann_set = annotation_set_filter
-            annotation_idx = self.annotation_sets.index(annotation_set_filter)
+            cat_idx = self.annotation_sets.index(annotation_set_filter)
         else:
             self.chosen_ann_set = self.annotation_sets
-            annotation_idx = 0
+            cat_idx = 0
 
         self.cat_info = {int(k): v for k, v in data['categories'].items()}
 
-        # Process annotations
-        cat_inst_count = dict()
+        self.cat_instance_count = dict
+        # -- end of load once --
 
-        ann_id = []
-        annotations = {'a_bbox': [],
-                       'o_bbox': [],
-                       'cat_id': [],
-                       'area': [],
-                       'img_id': [],
-                       'comments': []}
+        # TODO support complete version
+        img_infos, img_idx_lookup, cat_inst_cnt, ann_df = self.load_annotation_file(self.train_ann_file, cat_idx)
 
-        for k, v in data['annotations'].items():
-            # TODO find better alternative (e.g. self.cat_info?)
-            cat_id = v['cat_id'][annotation_idx]
-            cat_inst_count.setdefault(cat_id, 0)
-            cat_inst_count[cat_id] += 1
+        self.img_idx_lookup.update(img_idx_lookup)
+        self.cat_instance_count.update(cat_inst_cnt)
 
-            ann_id.append(int(k))
-            annotations['a_bbox'].append(v['a_bbox'])
-            annotations['o_bbox'].append(v['o_bbox'])
-            annotations['cat_id'].append(v['cat_id'])
-            annotations['area'].append(v['area'])
-            annotations['img_id'].append(v['img_id'])
-            annotations['comments'].append(v['comments'])
-
-        class_keys = list(cat_inst_count.keys())
-        self.cat_instance_count = {i: cat_inst_count[i] for i in class_keys}
+        if self.img_infos is None:
+            self.img_infos = img_infos
+        else:
+            self.img_infos.extend(img_infos)
 
         if self.ann_info is None:
-            self.ann_info = pandas.DataFrame(annotations, ann_id)
-        # else:
-        #     # TODO support complete version
-
-        if self.img_info is None:
-            self.img_info = data['images']
-        # else:
-        #     # TODO support complete version
-        #     self.img_info.extend(data['images'])
-
-        for i, img in enumerate(data['images']):
-            self.ann_ids.extend(img['ann_ids'])
-            # lookup table used to figure out the index in img_info of image based on their img_id
-            self.img_idx_lookup[int(img['id'])] = i
+            self.ann_info = ann_df
+        else:
+            # TODO check difference with default inner
+            self.ann_info.merge(ann_df, how='left')
 
         print("--- ANNOTATION INFO ---")
         print(repr(self))
@@ -202,19 +239,19 @@ class DeepScores:
             assert isinstance(idxs, list), 'Given indices idxs must be a ' \
                                            'list or tuple'
 
-            return [self.img_info[idx] for idx in idxs]
+            return [self.img_infos[idx] for idx in idxs]
         else:
             assert isinstance(ids, list), 'Given ids must be a list or tuple'
-            return [self.img_info[self.img_idx_lookup[i]] for i in ids]
+            return [self.img_infos[self.img_idx_lookup[i]] for i in ids]
 
     def get_anns(self, img_idx=None, img_id=None, ann_set_filter=None):
         self._xor_args(img_idx, img_id)
 
         if img_idx is not None:
-            return self.get_ann_info(self.img_info[img_idx]['ann_ids'],
+            return self.get_ann_info(self.img_infos[img_idx]['ann_ids'],
                                      ann_set_filter)
         else:
-            ann_ids = self.img_info[self.img_idx_lookup[img_id]]['ann_ids']
+            ann_ids = self.img_infos[self.img_idx_lookup[img_id]]['ann_ids']
             return self.get_ann_info(ann_ids, ann_set_filter)
 
     def get_cats(self):
@@ -517,7 +554,7 @@ class DeepScores:
         # # TODO make progress visualizer
         # progress_ctr = 0
         with ThreadPoolExecutor() as executor:
-            for img_info in self.img_info:
+            for img_info in self.img_infos:
                 # if progress_ctr % int(len(self.img_info) / 10) == 0:
                 #     print(f"progress: {int(progress_ctr / len(self.img_info) * 100)}%")
                 # progress_ctr += 1
