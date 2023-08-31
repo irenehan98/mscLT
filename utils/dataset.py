@@ -3,6 +3,7 @@ partially based on obb_anns (https://github.com/yvan674/obb_anns)
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import List
 from os import path
@@ -53,7 +54,7 @@ class DeepScores:
         self.dataset_info = None
         self.annotation_sets = None
         self.chosen_ann_set = None  # type: None or List[str]
-        self.cat_instance_count = dict()
+        self.cat_instance_count = None
         self.ann_info = None
         self.cat_info = None
         self.img_info = None  # img_info has 'id' 'filename' 'width' 'height' 'ann_ids'
@@ -386,6 +387,9 @@ class DeepScores:
             img.save(path.join(out_dir, datetime.now().strftime('%m-%d_%H%M%S'))
                      + '.png')
 
+    # def visualize_categories(self):
+    #     self.cat_info
+
     def remap_empty_cat_id(self, anns, class_counter, new_mapping=None, starts_from_one=False):
         rev_cat_ctr = None
         if new_mapping is None:
@@ -431,6 +435,7 @@ class DeepScores:
         return rev_cat_ctr, new_mapping, anns
 
     def crop_bounding_boxes(self,
+                            executor,
                             img,
                             ann_info,
                             class_counter,
@@ -452,8 +457,6 @@ class DeepScores:
         new_anns = []
         # split the gt bounding boxes onto the image
         for ann in ann_info.to_dict('records'):
-            bbox = self.moderate_bbox(ann['a_bbox'], img.size)
-
             last_id += 1
             current_id = last_id
 
@@ -462,12 +465,9 @@ class DeepScores:
             class_counter.setdefault(cat_id, 0)
             class_counter[cat_id] += 1
 
-            result = crop_object(img, bbox, min_dim, bg_opacity, resize, debug)
+            bbox = self.moderate_bbox(ann['a_bbox'], img.size)
 
-            if verbose:
-                width, height = result.size
-                if width > min_dim or height > min_dim:
-                    print(f"[WARNING] obj {name} has dimension {result.size}")
+            result = crop_object(img, bbox, min_dim, bg_opacity, resize, debug)
 
             out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:06d}') + '.png'
             result.save(out_fp)
@@ -516,24 +516,25 @@ class DeepScores:
 
         # # TODO make progress visualizer
         # progress_ctr = 0
-        for img_info in self.img_info:
-            # if progress_ctr % int(len(self.img_info) / 10) == 0:
-            #     print(f"progress: {int(progress_ctr / len(self.img_info) * 100)}%")
-            # progress_ctr += 1
+        with ThreadPoolExecutor() as executor:
+            for img_info in self.img_info:
+                # if progress_ctr % int(len(self.img_info) / 10) == 0:
+                #     print(f"progress: {int(progress_ctr / len(self.img_info) * 100)}%")
+                # progress_ctr += 1
 
-            img_id = [img_info['id']]
+                img_id = [img_info['id']]
 
-            img_info, ann_info = [i[0] for i in self.get_img_ann_pair(ids=img_id)]
+                img_info, ann_info = [i[0] for i in self.get_img_ann_pair(ids=img_id)]
 
-            img_fp = path.join(self.root, 'images', img_info['filename'])
-            img = Image.open(img_fp)
+                img_fp = path.join(self.root, 'images', img_info['filename'])
+                img = Image.open(img_fp)
 
-            last_id, bb_annotations = self.crop_bounding_boxes(img, ann_info, class_counter, out_dir, annotation_set, last_id, bg_opacity, resize=resize, ann_style=ann_style, verbose=verbose, debug=debug)
-            annotations.extend(bb_annotations)
+                last_id, bb_annotations = self.crop_bounding_boxes(executor, img, ann_info, class_counter, out_dir, annotation_set, last_id, bg_opacity, resize=resize, ann_style=ann_style, verbose=verbose, debug=debug)
+                annotations.extend(bb_annotations)
 
-            if debug:
-                print(annotations)
-                break
+                if debug:
+                    print(annotations)
+                    break
 
         class_keys = list(class_counter.keys())
         class_keys.sort()
