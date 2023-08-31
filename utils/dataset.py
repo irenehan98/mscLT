@@ -246,6 +246,29 @@ class DeepScores:
 
         print("loading annotations done in {:.2f}s".format(time() - start_time))
 
+    def check_overlap_train_test(self):
+        train_imgs = set()
+        for ann_file in tqdm(self.train_ann_files, 'train file checked: ', unit='file'):
+            with open(ann_file, 'r') as file:
+                data = json.load(file)
+            img_fps = [img_info['filename'] for img_info in data['images']]
+            train_imgs.update(img_fps)
+
+        test_imgs = set()
+        for ann_file in tqdm(self.test_ann_files, 'test file checked: ', unit='file'):
+            with open(ann_file, 'r') as file:
+                data = json.load(file)
+            img_fps = [img_info['filename'] for img_info in data['images']]
+            test_imgs.update(img_fps)
+
+        overlap_set = set()
+        for file in test_imgs:
+            if file in train_imgs:
+                overlap_set.add(file)
+
+        print(f"{len(overlap_set)} overlap out of {len(test_imgs)} test and {len(train_imgs)} train images.")
+        return overlap_set
+
     def get_imgs(self, idxs=None, ids=None):
         self._xor_args(idxs, ids)
 
