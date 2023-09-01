@@ -51,7 +51,7 @@ def get_random_inst_idxs(rand_max, idx_amt):
 def generate_train_annotations(cat_instances, excl_sets, cat_info, new_mapping, home_dir, filename, current_id, style):
     print(f"generating {filename}..")
 
-    out_dir = path.join(home_dir, filename)
+    img_dir = path.join(home_dir, 'cropped')
     annotations = []
 
     cat_cnt = 0
@@ -68,7 +68,7 @@ def generate_train_annotations(cat_instances, excl_sets, cat_info, new_mapping, 
             # WARNING: quick implementation only, use your own params!
             width, height = (150, 150)
             # WARNING: len depends on dataset_type
-            img_fp = path.join(out_dir, f'{name}-{idx:06d}') + '.png'
+            img_fp = path.join(img_dir, f'{name}-{idx:06d}') + '.png'
             if style == 'bbn':
                 annotations.append(new_bbn_ann_inst(cat_id, current_id, height, img_fp, width))
             current_id += 1
@@ -79,7 +79,7 @@ def generate_train_annotations(cat_instances, excl_sets, cat_info, new_mapping, 
 
 def generate_annotation(idx_sets, cat_info, new_mapping, home_dir, filename, current_id, style):
     print(f"generating {filename}..")
-    out_dir = path.join(home_dir, filename)
+    img_dir = path.join(home_dir, 'cropped')
     annotations = []
     for cat, idx_set in idx_sets:
         name = cat_info[cat]['name']
@@ -89,7 +89,7 @@ def generate_annotation(idx_sets, cat_info, new_mapping, home_dir, filename, cur
             # WARNING: quick implementation only, use your own params!
             width, height = (150, 150)
             # WARNING: len depends on dataset_type
-            img_fp = path.join(out_dir, f'{name}-{idx:06d}') + '.png'
+            img_fp = path.join(img_dir, f'{name}-{idx:06d}') + '.png'
             if style == 'bbn':
                 annotations.append({
                     "image_id": current_id,
@@ -125,7 +125,6 @@ def generate_all_annotations(cat_instances, cat_info, home_dir, style='bbn', new
     test_set, val_set = generate_test_val_set(cat_instances, 0.2, 0.2)
 
     current_id = 1
-
     current_id = generate_annotation(test_set.items(), cat_info, new_mapping, home_dir, 'test.json', current_id, style)
     current_id = generate_annotation(val_set.items(), cat_info, new_mapping, home_dir, 'val.json', current_id, style)
 
