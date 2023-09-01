@@ -3,7 +3,10 @@ partially based on obb_anns (https://github.com/yvan674/obb_anns)
 """
 import itertools
 import json
-from concurrent.futures import ThreadPoolExecutor
+import math
+import os
+import random
+from concurrent import futures
 from datetime import datetime
 from typing import List
 from os import path
@@ -16,6 +19,124 @@ import numpy
 import pandas
 
 
+def new_bbn_ann_inst(cat_id, current_id, height, img_fp, width):
+    return {
+        "image_id": current_id,
+        "im_height": height,
+        "im_width": width,
+        "category_id": cat_id,
+        "fpath": img_fp,
+    }
+
+
+def calc_resulting_dim(img_size, bbox, resize):
+    if resize is not None:
+        return resize
+
+    # TODO unfinished draft
+    x0, y0, x1, y1 = bbox
+    width, height = int(x1 - x0), int(y1 - y0)
+    max_width, max_height = img_size
+
+    return width, height
+
+
+def get_random_inst_idxs(rand_max, idx_amt):
+    idx_set = set()
+    while len(idx_set) < idx_amt:
+        idx_set.add(random.randint(0, rand_max - 1))
+    return idx_set
+
+
+def generate_train_annotations(cat_instances, excl_sets, cat_info, new_mapping, home_dir, filename, current_id, style):
+    print(f"generating {filename}..")
+
+    out_dir = path.join(home_dir, filename)
+    annotations = []
+
+    cat_cnt = 0
+    for cat, cnt in cat_instances:
+        if cnt <= 0:
+            continue
+        cat_cnt += 1
+
+        name = cat_info[cat]['name']
+        cat_id = cat if cat not in new_mapping else new_mapping[cat]
+        for idx in range(cnt):
+            if idx in excl_sets[cat]:
+                continue
+            # WARNING: quick implementation only, use your own params!
+            width, height = (150, 150)
+            # WARNING: len depends on dataset_type
+            img_fp = path.join(out_dir, f'{name}-{idx:06d}') + '.png'
+            if style == 'bbn':
+                annotations.append(new_bbn_ann_inst(cat_id, current_id, height, img_fp, width))
+            current_id += 1
+    with open(path.join(home_dir, filename), 'w') as fp:
+        json.dump({'annotations': annotations, 'num_classes': cat_cnt, "remapped_cats": new_mapping}, fp)
+    return
+
+
+def generate_annotation(idx_sets, cat_info, new_mapping, home_dir, filename, current_id, style):
+    print(f"generating {filename}..")
+    out_dir = path.join(home_dir, filename)
+    annotations = []
+    for cat, idx_set in idx_sets:
+        name = cat_info[cat]['name']
+        # TODO handle new_mapping value None
+        cat_id = cat if cat not in new_mapping else new_mapping[cat]
+        for idx in idx_set:
+            # WARNING: quick implementation only, use your own params!
+            width, height = (150, 150)
+            # WARNING: len depends on dataset_type
+            img_fp = path.join(out_dir, f'{name}-{idx:06d}') + '.png'
+            if style == 'bbn':
+                annotations.append({
+                    "image_id": current_id,
+                    "im_height": height,
+                    "im_width": width,
+                    "category_id": cat_id,
+                    "fpath": img_fp,
+                })
+            current_id += 1
+    with open(path.join(home_dir, filename), 'w') as fp:
+        json.dump({'annotations': annotations, 'num_classes': len(idx_sets), "remapped_cats": new_mapping}, fp)
+    return current_id
+
+
+def generate_test_val_set(cat_instances, test_coef, val_coef):
+    test_sets = dict()
+    val_sets = dict()
+
+    for k, cnt in cat_instances:
+        if cnt <= 0:
+            continue
+
+        test_cnt = max(1, math.floor(cnt * test_coef))
+        val_cnt = max(1, math.floor(cnt * val_coef))
+
+        test_sets[k] = get_random_inst_idxs(cnt, test_cnt)
+        val_sets[k] = get_random_inst_idxs(cnt, val_cnt)
+    return test_sets, val_sets
+
+
+# TODO get max decimal len
+def generate_all_annotations(cat_instances, cat_info, home_dir, style='bbn', new_mapping=None):
+    test_set, val_set = generate_test_val_set(cat_instances, 0.2, 0.2)
+
+    current_id = 1
+
+    current_id = generate_annotation(test_set.items(), cat_info, new_mapping, home_dir, 'test.json', current_id, style)
+    current_id = generate_annotation(val_set.items(), cat_info, new_mapping, home_dir, 'val.json', current_id, style)
+
+    combined_set = test_set
+    for k, v in val_set.items():
+        combined_set[k].update(v)
+    generate_train_annotations(cat_instances, combined_set, cat_info, new_mapping, home_dir, 'train.json', current_id, style)
+    return
+
+
+# TODO rename to crop_with_bg
 def crop_object(img, bbox, min_dim, bg_opacity, resize, debug):
     x0, y0, x1, y1 = bbox
     width, height = int(x1 - x0), int(y1 - y0)
@@ -60,7 +181,7 @@ class DeepScores:
         self.cat_infos = None
         self.img_infos = None  # img_info has 'id' 'filename' 'width' 'height' 'ann_ids'
         self.img_idx_lookup = dict()  # lookup table used to figure out the index in img_info of image based on their img_id
-        self.ann_ids = []
+        # self.ann_ids = []
 
         self.root = root_dir
         self.dataset_type = dataset_type
@@ -137,6 +258,13 @@ class DeepScores:
             y1 = min(img_height, y1 + 1)
 
         return [x0, y0, x1, y1]
+
+    @staticmethod
+    def combine_cat_inst_cnt(inst_cnt, more_cnt):
+        # WARNING: unknown categories in muscima++ has None as key values
+        for k, v in more_cnt.items():
+            inst_cnt[int(k)] += v
+        return inst_cnt
 
     @staticmethod
     def load_annotation_file(ann_fp, cat_idx, with_ann_df=True):
@@ -221,31 +349,36 @@ class DeepScores:
 
         self.cat_infos = {int(k): v for k, v in data['categories'].items()}
 
-        self.cat_instance_count = dict()
+        cat_instance_count = dict()
         for cat in self.get_cats():
-            self.cat_instance_count.setdefault(cat, 0)
+            cat_instance_count.setdefault(cat, 0)
 
-        print(f"info loaded in {time() - start_time:.6f}s..")
+        print(f"basic info loaded in {time() - start_time:.6f}s..")
         # -- end of load once --
 
         self.img_infos = []
 
         # press F for my 32gb ram it ain't enough for multithreading
-        if self.dataset_type == 'dense':
-            img_infos, img_idx_lookup, cat_inst_cnt, ann_df = self.load_annotation_file(ref_file, cat_idx)
+        if load_all:
+            with_ann_df = True if self.dataset_type == 'dense' else False
+            files = self.train_ann_files + self.test_ann_files
+            ann_infos = []
+            for ann_file in tqdm(files, 'file processed: ', unit='file'):
+                img_infos, img_idx_lookup, new_inst_cnt, ann_df = self.load_annotation_file(ann_file, cat_idx,
+                                                                                            with_ann_df)
+                self.img_idx_lookup.update(img_idx_lookup)
+                cat_instance_count = self.combine_cat_inst_cnt(cat_instance_count, new_inst_cnt)
+                self.img_infos.extend(img_infos)
+                ann_infos.append(ann_df)
+            self.ann_infos = pandas.concat(ann_infos)
+        elif self.dataset_type == 'dense':
+            img_infos, img_idx_lookup, new_inst_cnt, ann_df = self.load_annotation_file(ref_file, cat_idx)
             self.img_idx_lookup.update(img_idx_lookup)
-            for k, v in cat_inst_cnt.items():
-                self.cat_instance_count[int(k)] += v
+            cat_instance_count = self.combine_cat_inst_cnt(cat_instance_count, new_inst_cnt)
             self.img_infos.extend(img_infos)
             self.ann_infos = ann_df
-        elif self.dataset_type == 'complete' and load_all:
-            files = self.train_ann_files + self.test_ann_files
-            for ann_file in tqdm(files, 'file processed: ', unit='file'):
-                img_infos, img_idx_lookup, cat_inst_cnt, ann_df = self.load_annotation_file(ann_file, cat_idx, with_ann_df=False)
-                self.img_idx_lookup.update(img_idx_lookup)
-                for k, v in cat_inst_cnt.items():
-                    self.cat_instance_count[int(k)] += v
-                self.img_infos.extend(img_infos)
+
+        self.cat_instance_count = cat_instance_count
 
         # TODO handle complete dataset ann_infos usage
 
@@ -254,6 +387,18 @@ class DeepScores:
         print("--- ANNOTATION INFO ---")
 
         print("loading annotations done in {:.2f}s".format(time() - start_time))
+
+    def generate_annotations(self):
+        start = time()
+        print("generating annotations...")
+        cat_instances = self.cat_instance_count.items()
+        new_mapping = None
+
+        cat_with_inst_cnt = sum([1 if cnt > 0 else 0 for _, cnt in cat_instances])
+        if cat_with_inst_cnt < len(cat_instances):
+            new_mapping = self.get_new_mapping(self.cat_instance_count)
+        generate_all_annotations(cat_instances, self.cat_infos, self.root, new_mapping=new_mapping)
+        print(f"done generating annotations in {time() - start:.6f}s")
 
     def check_overlap_train_test(self):
         train_imgs = set()
@@ -277,6 +422,11 @@ class DeepScores:
 
         print(f"{len(overlap_set)} overlap out of {len(test_imgs)} test and {len(train_imgs)} train images.")
         return overlap_set
+
+    def sort_cat_instances(self):
+        cat_cnt = self.cat_instance_count
+        self.cat_instance_count = sorted(cat_cnt.items(), key=lambda item: item[1], reverse=True)
+        return self.cat_instance_count
 
     def get_img_infos(self, idxs=None, ids=None):
         self._xor_args(idxs, ids)
@@ -326,6 +476,7 @@ class DeepScores:
 
         return selected
 
+    # TODO optimize img_infos
     def get_img_ann_pair(self, ann_infos, idxs=None, ids=None, img_infos=None, ann_set_filter=None):
         if img_infos is None:
             self._xor_args(idxs, ids)
@@ -408,7 +559,7 @@ class DeepScores:
 
         img_info, ann_info = [i[0] for i in
                               self.get_img_ann_pair(self.ann_infos,
-                                  idxs=img_idx, ids=img_id)]
+                                                    idxs=img_idx, ids=img_id)]
 
         img_dir = path.join(self.root, 'images')
         seg_dir = path.join(self.root, 'segmentation')
@@ -474,39 +625,10 @@ class DeepScores:
     # def visualize_categories(self):
     #     self.cat_info
 
-    def remap_empty_cat_id(self, anns, class_counter, new_mapping=None, starts_from_one=False):
-        rev_cat_ctr = None
-        if new_mapping is None:
-            new_mapping = dict()
-
-        print("remapping categories...")
+    def remap_empty_cat_id(self, anns, new_mapping):
+        print("remapping...")
         start_time = time()
-
-        if len(new_mapping) <= 0:
-            rev_cat_ctr = len(self.get_cats())
-
-            start = 1 if starts_from_one else 0
-            end = len(class_counter) + start
-
-            for i in range(start, end):
-                # print(f"[debug] i: {i}")
-                if i is rev_cat_ctr:
-                    if i not in class_counter or class_counter[i] == 0:
-                        print(f"class id {i} is empty")
-                        rev_cat_ctr -= 1
-                    break
-
-                if i not in class_counter or class_counter[i] == 0:
-                    print(f"key {i} not in class_counter; rev_cat_ctr: {rev_cat_ctr, rev_cat_ctr in class_counter}")
-                    while rev_cat_ctr not in class_counter or class_counter[rev_cat_ctr] == 0:
-                        rev_cat_ctr -= 1
-                        # print(f"[debug] back_ctr: {rev_cat_ctr}")
-                    print(f"key {rev_cat_ctr} is remapped to {i}")
-                    new_mapping[rev_cat_ctr] = i
-                    rev_cat_ctr -= 1
-            print(f"rev_cat_ctr: {rev_cat_ctr}")
-            print(f"new mapping: {new_mapping}")
-
+        
         remap_cnt = 0
         for ann in anns:
             cat_id = ann['category_id']
@@ -516,7 +638,61 @@ class DeepScores:
                 remap_cnt += 1
 
         print(f"remapped {remap_cnt} annotations in t={time() - start_time:.6f}s")
-        return rev_cat_ctr, new_mapping, anns
+        return new_mapping, anns
+
+    def get_new_mapping(self, cat_instances, starts_from=0):
+        new_mapping = dict()
+        print("get new mappings...")
+        cat_len = len(self.get_cats())
+
+        end = len(cat_instances) + starts_from
+        print(f"start to end: {starts_from, end}")
+        for i in range(starts_from, end):
+            if i == cat_len:
+                print(f"i reached cat_len {i, cat_len}.")
+                if i not in cat_instances or cat_instances[i] == 0:
+                    print(f"hey! class id {i} is empty too!")
+                    cat_len -= 1
+                break
+
+            if i not in cat_instances or cat_instances[i] == 0:
+                while cat_len not in cat_instances or cat_instances[cat_len] == 0:
+                    cat_len -= 1
+                    if cat_len <= i:
+                        print(f"cat len {cat_len} reached i ({i})!")
+                        break
+                new_mapping[cat_len] = i
+                cat_len -= 1
+        print(f"new mapping: {new_mapping}")
+        return new_mapping
+
+    def crop_image_objects_complete(self,
+                                    executor,
+                                    img,
+                                    ann_info,
+                                    class_counter,
+                                    out_dir,
+                                    bg_opacity=0,
+                                    min_dim=150,
+                                    resize=None,
+                                    verbose=False,
+                                    debug=False):
+        # split the gt bounding boxes onto the image
+        for ann in ann_info.to_dict('records'):
+            cat_id = ann['cat_id'][0]
+            name = self.cat_infos[cat_id]['name']
+            # class_counter.setdefault(cat_id, 0)
+            class_counter[cat_id] += 1
+            out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:08d}') + '.png'
+
+            bbox = self.moderate_bbox(ann['a_bbox'], img.size)
+
+            executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp, debug)
+
+            if debug:
+                break
+        # futures.wait(executor)
+        return
 
     def crop_image_objects_dense(self,
                                  img,
@@ -527,61 +703,40 @@ class DeepScores:
                                  bg_opacity=0,
                                  min_dim=150,
                                  resize=None,
-                                 ann_style=None,
-                                 verbose=False,
                                  debug=False):
-        new_anns = []
         # split the gt bounding boxes onto the image
-        for ann in ann_info.to_dict('records'):
-            last_id += 1
-            current_id = last_id
+        with futures.ThreadPoolExecutor() as executor:
+            for ann in ann_info.to_dict('records'):
 
-            cat_id = ann['cat_id'][0]
-            name = self.cat_infos[cat_id]['name']
-            class_counter.setdefault(cat_id, 0)
-            class_counter[cat_id] += 1
+                cat_id = ann['cat_id'][0]
+                name = self.cat_infos[cat_id]['name']
+                class_counter.setdefault(cat_id, 0)
+                class_counter[cat_id] += 1
 
-            bbox = self.moderate_bbox(ann['a_bbox'], img.size)
-            out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:06d}') + '.png'
+                bbox = self.moderate_bbox(ann['a_bbox'], img.size)
+                out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:06d}') + '.png'
 
-            result = self.crop_save_obj_img(img, bbox, resize, min_dim, bg_opacity, out_fp, debug)
+                executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp, debug)
 
-            if ann_style == "BBN":
-                width, height = result.size
-                new_anns.append({
-                    "image_id": current_id,
-                    "im_height": height,
-                    "im_width": width,
-                    "category_id": cat_id,
-                    "fpath": out_fp,
-                })
-
-            if debug is True:
-                result.show()
-                break
-
-        if debug:
-            print(new_anns)
-
-        return last_id, new_anns
+        return last_id
 
     def crop_all_to_instances(self,
                               out_dir=None,
-                              out_annot='annotations.json',
                               annotation_set=None,
                               bg_opacity=0,
-                              ann_style=None,
                               resize=None,
                               verbose=False,
                               debug=False,
-                              class_counter=None,
+                              cat_inst_ctr=None,
                               last_id=0):
         assert out_dir is not None, "out_dir can't be empty"
+        if not os.path.exists(out_dir):
+            os.mkdir(out_dir)
 
-        if class_counter is None:
-            class_counter = dict()
+        if cat_inst_ctr is None:
+            cat_inst_ctr = dict()
             for cat in self.get_cats():
-                self.cat_instance_count.setdefault(cat, 0)
+                cat_inst_ctr.setdefault(cat, 0)
 
         if annotation_set is None:
             self.chosen_ann_set = self.annotation_sets[0]
@@ -593,39 +748,44 @@ class DeepScores:
 
         if self.dataset_type == 'complete':
             fps = self.train_ann_files + self.test_ann_files
-            # TODO
-        elif self.dataset_type == 'dense':
-            annotations = []
-            # TODO make progress visualizer
-            for img_info in self.img_infos:
-                img_id = [img_info['id']]
+            cat_idx = self.annotation_sets.index(self.chosen_ann_set)
+            for fp in tqdm(fps, 'read file', unit='file'):
+                with futures.ThreadPoolExecutor() as executor:
+                    img_infos, _, new_inst_cnt, ann_df = self.load_annotation_file(fp, cat_idx)
+                    for img_info in tqdm(img_infos, 'queued imgs', unit='img'):
+                        # for img_info in img_infos:
+                        _, ann_info = [i[0] for i in self.get_img_ann_pair(ann_df, img_infos=[img_info])]
+                        img_fp = path.join(self.root, 'images', img_info['filename'])
+                        img = Image.open(img_fp)
 
-                img_info, ann_info = [i[0] for i in self.get_img_ann_pair(self.ann_infos, ids=img_id)]
+                        self.crop_image_objects_complete(executor, img, ann_info, cat_inst_ctr, out_dir, bg_opacity,
+                                                         resize=resize, verbose=verbose, debug=debug)
+                    cat_inst_ctr = self.combine_cat_inst_cnt(cat_inst_ctr, new_inst_cnt)
+            print(f'done t={time() - start_time:.6f}s')
+        elif self.dataset_type == 'dense':
+            prog_file = path.join(self.root, 'crop_dense_prog.json')
+            has_progress = path.isfile(prog_file)
+            skip = True if has_progress else False
+            if has_progress:
+                with open(prog_file, 'r') as file:
+                    data = json.load(file)
+                    last_file = data['last_file']
+                    last_id = data['last_id']
+                    cat_inst_ctr = data['cat_inst_ctr']
+            for img_info in tqdm(self.img_infos, desc='progress', unit='img'):
+                if skip:
+                    if img_info['filename'] == last_file:
+                        skip = False
+                    continue
 
                 img_fp = path.join(self.root, 'images', img_info['filename'])
+                _, ann_info = [i[0] for i in self.get_img_ann_pair(self.ann_infos, img_infos=[img_info])]
                 img = Image.open(img_fp)
 
-                last_id, bb_annotations = self.crop_image_objects_dense(img, ann_info, class_counter, out_dir, last_id, bg_opacity, resize=resize, ann_style=ann_style, verbose=verbose, debug=debug)
-                annotations.extend(bb_annotations)
+                last_id = self.crop_image_objects_dense(img, ann_info, cat_inst_ctr, out_dir, last_id, bg_opacity, resize=resize, debug=debug)
 
-                if debug:
-                    print(annotations)
-                    break
-
-            class_keys = list(class_counter.keys())
-            class_keys.sort()
-            class_counter = {i: class_counter[i] for i in class_keys}
-            print(f"class_counter: {class_counter}")
-
-            num_classes = len(self.get_cats())
-
-            if ann_style == "BBN":
-                if len(class_counter) < num_classes:
-                    num_classes, remapped_cat, annotations = self.remap_empty_cat_id(annotations, class_counter)
-
-            # turn into json
-            with open(path.join(self.root, out_annot), 'w') as fp:
-                json.dump({'annotations': annotations, 'num_classes': num_classes, "remapped_cat_id": remapped_cat}, fp)
-
-        print(f'done t={time() - start_time:.6f}s: total annotation {len(annotations)} with {len(class_counter)} out of {num_classes} classes')
-        return last_id, class_counter
+                with open(path.join(self.root, 'crop_dense_prog.json'), 'w') as fp:
+                    json.dump({'last_file': img_info['filename'], 'last_id': last_id, 'cat_inst_ctr': cat_inst_ctr}, fp)
+            print(f'done t={time() - start_time:.6f}s')
+            # print(f"total annotation {len(annotations)} with {len(cat_inst_ctr)} out of {num_classes} classes")
+        return last_id, cat_inst_ctr
