@@ -136,7 +136,7 @@ def generate_all_annotations(cat_instances, cat_info, home_dir, style='bbn', new
 
 
 # TODO rename to crop_with_bg
-def crop_object(img, bbox, min_dim, bg_opacity, resize, debug):
+def crop_object(img, bbox, min_dim, bg_opacity, resize):
     x0, y0, x1, y1 = bbox
     width, height = int(x1 - x0), int(y1 - y0)
     max_width, max_height = img.size
@@ -155,14 +155,6 @@ def crop_object(img, bbox, min_dim, bg_opacity, resize, debug):
 
     if resize is not None:
         result = result.resize(resize)
-
-    if debug is True:
-        print(f"wdiff: {bg_wdiff} hdiff: {bg_hdiff}")
-        print(f"bg: {bg_x0, bg_y0, bg_x1, bg_y1}")
-        print(f"cropped: {cropped.size} bg: {bg_cropped.size}")
-        cropped.show()
-        bg_cropped.show()
-        print(f"result: {result.size}")
 
     return result
 
@@ -313,12 +305,9 @@ class DeepScores:
         return img_infos, img_idx_lookup, cat_inst_count, ann_df
 
     @staticmethod
-    def crop_save_obj_img(img, bbox, resize, min_dim, bg_opacity, out_fp, debug):
-        result = crop_object(img, bbox, min_dim, bg_opacity, resize, debug)
+    def crop_save_obj_img(img, bbox, resize, min_dim, bg_opacity, out_fp):
+        result = crop_object(img, bbox, min_dim, bg_opacity, resize)
         result.save(out_fp)
-
-        if debug:
-            result.show()
         return result
 
     def load_annotations(self, annotation_set_filter=None, load_all=True):
@@ -673,36 +662,19 @@ class DeepScores:
                                     out_dir,
                                     bg_opacity=0,
                                     min_dim=150,
-                                    resize=None,
-                                    verbose=False,
-                                    debug=False):
+                                    resize=None):
         # split the gt bounding boxes onto the image
         for ann in ann_info.to_dict('records'):
             cat_id = ann['cat_id'][0]
             name = self.cat_infos[cat_id]['name']
-            # class_counter.setdefault(cat_id, 0)
             class_counter[cat_id] += 1
+
             out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:08d}') + '.png'
-
             bbox = self.moderate_bbox(ann['a_bbox'], img.size)
-
             executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp, debug)
-
-            if debug:
-                break
-        # futures.wait(executor)
         return
 
-    def crop_image_objects_dense(self,
-                                 img,
-                                 ann_info,
-                                 class_counter,
-                                 out_dir,
-                                 last_id=0,
-                                 bg_opacity=0,
-                                 min_dim=150,
-                                 resize=None,
-                                 debug=False):
+    def crop_image_objects_dense(self, img, ann_info, class_counter, out_dir, bg_opacity=0, min_dim=150, resize=None):
         # split the gt bounding boxes onto the image
         with futures.ThreadPoolExecutor() as executor:
             for ann in ann_info.to_dict('records'):
@@ -715,19 +687,17 @@ class DeepScores:
                 bbox = self.moderate_bbox(ann['a_bbox'], img.size)
                 out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:06d}') + '.png'
 
-                executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp, debug)
+                executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp)
 
-        return last_id
+        return class_counter
 
     def crop_all_to_instances(self,
                               out_dir=None,
                               annotation_set=None,
                               bg_opacity=0,
                               resize=None,
-                              verbose=False,
-                              debug=False,
                               cat_inst_ctr=None,
-                              last_id=0):
+                              cont=True):
         assert out_dir is not None, "out_dir can't be empty"
         if not os.path.exists(out_dir):
             os.mkdir(out_dir)
@@ -748,9 +718,9 @@ class DeepScores:
         if self.dataset_type == 'complete':
             fps = self.train_ann_files + self.test_ann_files
             cat_idx = self.annotation_sets.index(self.chosen_ann_set)
-            for fp in tqdm(fps, 'read file', unit='file'):
+            for file in tqdm(fps, 'read file', unit='file'):
                 with futures.ThreadPoolExecutor() as executor:
-                    img_infos, _, new_inst_cnt, ann_df = self.load_annotation_file(fp, cat_idx)
+                    img_infos, _, new_inst_cnt, ann_df = self.load_annotation_file(file, cat_idx)
                     for img_info in tqdm(img_infos, 'queued imgs', unit='img'):
                         # for img_info in img_infos:
                         _, ann_info = [i[0] for i in self.get_img_ann_pair(ann_df, img_infos=[img_info])]
@@ -758,19 +728,22 @@ class DeepScores:
                         img = Image.open(img_fp)
 
                         self.crop_image_objects_complete(executor, img, ann_info, cat_inst_ctr, out_dir, bg_opacity,
-                                                         resize=resize, verbose=verbose, debug=debug)
+                                                         resize=resize)
                     cat_inst_ctr = self.combine_cat_inst_cnt(cat_inst_ctr, new_inst_cnt)
             print(f'done t={time() - start_time:.6f}s')
         elif self.dataset_type == 'dense':
-            prog_file = path.join(self.root, 'crop_dense_prog.json')
-            has_progress = path.isfile(prog_file)
-            skip = True if has_progress else False
-            if has_progress:
-                with open(prog_file, 'r') as file:
-                    data = json.load(file)
-                    last_file = data['last_file']
-                    last_id = data['last_id']
-                    cat_inst_ctr = data['cat_inst_ctr']
+            skip = False
+            if cont:
+                prog_file = path.join(self.root, 'crop_dense_prog.json')
+                if path.isfile(prog_file):
+                    skip = True
+                    with open(prog_file, 'r') as file:
+                        data = json.load(file)
+                        last_file = data['last_file']
+                        for k, cnt in data['cat_inst_ctr'].items():
+                            cat_inst_ctr[int(k)] = cnt
+                        print(f"cat_inst_cnt: {cat_inst_ctr}")
+                        print("continuing..")
             for img_info in tqdm(self.img_infos, desc='progress', unit='img'):
                 if skip:
                     if img_info['filename'] == last_file:
@@ -781,10 +754,11 @@ class DeepScores:
                 _, ann_info = [i[0] for i in self.get_img_ann_pair(self.ann_infos, img_infos=[img_info])]
                 img = Image.open(img_fp)
 
-                last_id = self.crop_image_objects_dense(img, ann_info, cat_inst_ctr, out_dir, last_id, bg_opacity, resize=resize, debug=debug)
+                cat_inst_ctr = self.crop_image_objects_dense(img, ann_info, cat_inst_ctr, out_dir, bg_opacity, resize=resize)
 
-                with open(path.join(self.root, 'crop_dense_prog.json'), 'w') as fp:
-                    json.dump({'last_file': img_info['filename'], 'last_id': last_id, 'cat_inst_ctr': cat_inst_ctr}, fp)
+                with open(path.join(self.root, 'crop_dense_prog.json'), 'w') as file:
+                    json.dump({'last_file': img_info['filename'], 'cat_inst_ctr': cat_inst_ctr}, file)
+            print(f"cats: {cat_inst_ctr}")
             print(f'done t={time() - start_time:.6f}s')
             # print(f"total annotation {len(annotations)} with {len(cat_inst_ctr)} out of {num_classes} classes")
-        return last_id, cat_inst_ctr
+        return cat_inst_ctr
