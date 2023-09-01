@@ -140,7 +140,7 @@ class DeepScores:
 
     @staticmethod
     def load_annotation_file(ann_fp, cat_idx, with_ann_df=True):
-        start_time = time()
+        # start_time = time()
         with open(ann_fp, 'r') as ann_file:
             data = json.load(ann_file)
 
@@ -185,7 +185,16 @@ class DeepScores:
         # print(f"file {ann_fp} loaded in {time() - start_time:.6f}s")
         return img_infos, img_idx_lookup, cat_inst_count, ann_df
 
-    def load_annotations(self, annotation_set_filter=None):
+    @staticmethod
+    def crop_save_obj_img(img, bbox, resize, min_dim, bg_opacity, out_fp, debug):
+        result = crop_object(img, bbox, min_dim, bg_opacity, resize, debug)
+        result.save(out_fp)
+
+        if debug:
+            result.show()
+        return result
+
+    def load_annotations(self, annotation_set_filter=None, load_all=True):
         print("loading annotations...")
         start_time = time()
 
@@ -229,7 +238,7 @@ class DeepScores:
                 self.cat_instance_count[int(k)] += v
             self.img_infos.extend(img_infos)
             self.ann_infos = ann_df
-        elif self.dataset_type == 'complete':
+        elif self.dataset_type == 'complete' and load_all:
             files = self.train_ann_files + self.test_ann_files
             for ann_file in tqdm(files, 'file processed: ', unit='file'):
                 img_infos, img_idx_lookup, cat_inst_cnt, ann_df = self.load_annotation_file(ann_file, cat_idx, with_ann_df=False)
@@ -269,7 +278,7 @@ class DeepScores:
         print(f"{len(overlap_set)} overlap out of {len(test_imgs)} test and {len(train_imgs)} train images.")
         return overlap_set
 
-    def get_imgs(self, idxs=None, ids=None):
+    def get_img_infos(self, idxs=None, ids=None):
         self._xor_args(idxs, ids)
 
         if idxs is not None:
@@ -285,21 +294,21 @@ class DeepScores:
         self._xor_args(img_idx, img_id)
 
         if img_idx is not None:
-            return self.get_ann_info(self.img_infos[img_idx]['ann_ids'],
+            return self.get_ann_info(self.ann_infos, self.img_infos[img_idx]['ann_ids'],
                                      ann_set_filter)
         else:
             ann_ids = self.img_infos[self.img_idx_lookup[img_id]]['ann_ids']
-            return self.get_ann_info(ann_ids, ann_set_filter)
+            return self.get_ann_info(self.ann_infos, ann_ids, ann_set_filter)
 
     def get_cats(self):
         return {key: value for (key, value) in self.cat_infos.items()
                 if value['annotation_set'] in self.chosen_ann_set}
 
-    def get_ann_info(self, ann_ids, ann_set_filter=None):
+    def get_ann_info(self, ann_infos, ann_ids, ann_set_filter):
         assert isinstance(ann_ids, list), 'Given ann_ids must be a list or tuple'
 
         ann_ids = [int(i) for i in ann_ids]
-        selected = self.ann_infos.loc[ann_ids]
+        selected = ann_infos.loc[ann_ids]
 
         # Get annotation set index and return only the specific category id
         if ann_set_filter is None:
@@ -317,14 +326,15 @@ class DeepScores:
 
         return selected
 
-    def get_img_ann_pair(self, idxs=None, ids=None, ann_set_filter=None):
-        self._xor_args(idxs, ids)
+    def get_img_ann_pair(self, ann_infos, idxs=None, ids=None, img_infos=None, ann_set_filter=None):
+        if img_infos is None:
+            self._xor_args(idxs, ids)
+            img_infos = self.get_img_infos(idxs, ids)
 
-        images = self.get_imgs(idxs, ids)
-        annotations = [self.get_ann_info(img['ann_ids'], ann_set_filter)
-                       for img in images]
+        annotations = [self.get_ann_info(ann_infos, img_info['ann_ids'], ann_set_filter)
+                       for img_info in img_infos]
 
-        return images, annotations
+        return img_infos, annotations
 
     def _draw_bbox(self, draw, ann, color, oriented, annotation_set=None,
                    print_label=False, print_staff_pos=False, print_onset=False,
@@ -397,7 +407,7 @@ class DeepScores:
             self.chosen_ann_set = self.chosen_ann_set[annotation_set]
 
         img_info, ann_info = [i[0] for i in
-                              self.get_img_ann_pair(
+                              self.get_img_ann_pair(self.ann_infos,
                                   idxs=img_idx, ids=img_id)]
 
         img_dir = path.join(self.root, 'images')
@@ -508,26 +518,18 @@ class DeepScores:
         print(f"remapped {remap_cnt} annotations in t={time() - start_time:.6f}s")
         return rev_cat_ctr, new_mapping, anns
 
-    def crop_bounding_boxes(self,
-                            executor,
-                            img,
-                            ann_info,
-                            class_counter,
-                            out_dir,
-                            annotation_set=None,
-                            last_id=0,
-                            bg_opacity=0,
-                            min_dim=150,
-                            resize=None,
-                            ann_style=None,
-                            verbose=False,
-                            debug=False):
-
-        if annotation_set is None:
-            self.chosen_ann_set = self.annotation_sets[0]
-        else:
-            self.chosen_ann_set = self.chosen_ann_set[annotation_set]
-
+    def crop_image_objects_dense(self,
+                                 img,
+                                 ann_info,
+                                 class_counter,
+                                 out_dir,
+                                 last_id=0,
+                                 bg_opacity=0,
+                                 min_dim=150,
+                                 resize=None,
+                                 ann_style=None,
+                                 verbose=False,
+                                 debug=False):
         new_anns = []
         # split the gt bounding boxes onto the image
         for ann in ann_info.to_dict('records'):
@@ -540,11 +542,9 @@ class DeepScores:
             class_counter[cat_id] += 1
 
             bbox = self.moderate_bbox(ann['a_bbox'], img.size)
-
-            result = crop_object(img, bbox, min_dim, bg_opacity, resize, debug)
-
             out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:06d}') + '.png'
-            result.save(out_fp)
+
+            result = self.crop_save_obj_img(img, bbox, resize, min_dim, bg_opacity, out_fp, debug)
 
             if ann_style == "BBN":
                 width, height = result.size
@@ -576,54 +576,56 @@ class DeepScores:
                               debug=False,
                               class_counter=None,
                               last_id=0):
-        # TODO multithreading
-
         assert out_dir is not None, "out_dir can't be empty"
 
         if class_counter is None:
             class_counter = dict()
+            for cat in self.get_cats():
+                self.cat_instance_count.setdefault(cat, 0)
+
+        if annotation_set is None:
+            self.chosen_ann_set = self.annotation_sets[0]
+        else:
+            self.chosen_ann_set = self.chosen_ann_set[annotation_set]
 
         print("initiate cropping...")
         start_time = time()
 
-        annotations = []
-
-        # # TODO make progress visualizer
-        # progress_ctr = 0
-        with ThreadPoolExecutor() as executor:
+        if self.dataset_type == 'complete':
+            fps = self.train_ann_files + self.test_ann_files
+            # TODO
+        elif self.dataset_type == 'dense':
+            annotations = []
+            # TODO make progress visualizer
             for img_info in self.img_infos:
-                # if progress_ctr % int(len(self.img_info) / 10) == 0:
-                #     print(f"progress: {int(progress_ctr / len(self.img_info) * 100)}%")
-                # progress_ctr += 1
-
                 img_id = [img_info['id']]
 
-                img_info, ann_info = [i[0] for i in self.get_img_ann_pair(ids=img_id)]
+                img_info, ann_info = [i[0] for i in self.get_img_ann_pair(self.ann_infos, ids=img_id)]
 
                 img_fp = path.join(self.root, 'images', img_info['filename'])
                 img = Image.open(img_fp)
 
-                last_id, bb_annotations = self.crop_bounding_boxes(executor, img, ann_info, class_counter, out_dir, annotation_set, last_id, bg_opacity, resize=resize, ann_style=ann_style, verbose=verbose, debug=debug)
+                last_id, bb_annotations = self.crop_image_objects_dense(img, ann_info, class_counter, out_dir, last_id, bg_opacity, resize=resize, ann_style=ann_style, verbose=verbose, debug=debug)
                 annotations.extend(bb_annotations)
 
                 if debug:
                     print(annotations)
                     break
 
-        class_keys = list(class_counter.keys())
-        class_keys.sort()
-        class_counter = {i: class_counter[i] for i in class_keys}
-        print(f"class_counter: {class_counter}")
+            class_keys = list(class_counter.keys())
+            class_keys.sort()
+            class_counter = {i: class_counter[i] for i in class_keys}
+            print(f"class_counter: {class_counter}")
 
-        num_classes = len(self.get_cats())
+            num_classes = len(self.get_cats())
 
-        if ann_style == "BBN":
-            if len(class_counter) < num_classes:
-                num_classes, remapped_cat, annotations = self.remap_empty_cat_id(annotations, class_counter)
+            if ann_style == "BBN":
+                if len(class_counter) < num_classes:
+                    num_classes, remapped_cat, annotations = self.remap_empty_cat_id(annotations, class_counter)
 
-        # turn into json
-        with open(path.join(self.root, out_annot), 'w') as fp:
-            json.dump({'annotations': annotations, 'num_classes': num_classes, "remapped_cat_id": remapped_cat}, fp)
+            # turn into json
+            with open(path.join(self.root, out_annot), 'w') as fp:
+                json.dump({'annotations': annotations, 'num_classes': num_classes, "remapped_cat_id": remapped_cat}, fp)
 
         print(f'done t={time() - start_time:.6f}s: total annotation {len(annotations)} with {len(class_counter)} out of {num_classes} classes')
         return last_id, class_counter
