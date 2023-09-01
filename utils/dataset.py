@@ -697,7 +697,8 @@ class DeepScores:
                               bg_opacity=0,
                               resize=None,
                               cat_inst_ctr=None,
-                              cont=True):
+                              cont=True,
+                              sav=None):
         assert out_dir is not None, "out_dir can't be empty"
         if not os.path.exists(out_dir):
             os.mkdir(out_dir)
@@ -733,8 +734,8 @@ class DeepScores:
             print(f'done t={time() - start_time:.6f}s')
         elif self.dataset_type == 'dense':
             skip = False
+            prog_file = sav if sav is not None else path.join(self.root, 'crop_dense_prog.json')
             if cont:
-                prog_file = path.join(self.root, 'crop_dense_prog.json')
                 if path.isfile(prog_file):
                     skip = True
                     with open(prog_file, 'r') as file:
@@ -756,7 +757,7 @@ class DeepScores:
 
                 cat_inst_ctr = self.crop_image_objects_dense(img, ann_info, cat_inst_ctr, out_dir, bg_opacity, resize=resize)
 
-                with open(path.join(self.root, 'crop_dense_prog.json'), 'w') as file:
+                with open(prog_file, 'w') as file:
                     json.dump({'last_file': img_info['filename'], 'cat_inst_ctr': cat_inst_ctr}, file)
             print(f"cats: {cat_inst_ctr}")
             print(f'done t={time() - start_time:.6f}s')
