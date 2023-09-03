@@ -44,7 +44,7 @@ def calc_resulting_dim(img_size, bbox, resize):
 def get_random_inst_idxs(rand_max, idx_amt):
     idx_set = set()
     while len(idx_set) < idx_amt:
-        idx_set.add(random.randint(0, rand_max - 1))
+        idx_set.add(random.randint(1, rand_max))
     return idx_set
 
 
@@ -62,7 +62,7 @@ def generate_train_annotations(cat_instances, excl_sets, cat_info, new_mapping, 
 
         name = cat_info[cat]['name']
         cat_id = cat if cat not in new_mapping else new_mapping[cat]
-        for idx in range(cnt):
+        for idx in range(1, cnt+1):
             if idx in excl_sets[cat]:
                 continue
             # WARNING: quick implementation only, use your own params!
@@ -144,13 +144,15 @@ def crop_object(img, bbox, min_dim, bg_opacity, resize):
     bg_wdiff, bg_hdiff = max(0, min_dim - width), max(0, min_dim - height)
     bg_x0, bg_x1 = max(0, x0 - (bg_wdiff / 2)), min(max_width, x1 + (bg_wdiff / 2))
     bg_y0, bg_y1 = max(0, y0 - (bg_hdiff / 2)), min(max_height, y1 + (bg_hdiff / 2))
+    bg_width, bg_height = int(bg_x1-bg_x0), int(bg_y1-bg_y0)
 
     cropped = img.crop((x0, y0, x1, y1))
-    bg_cropped = img.crop((bg_x0, bg_y0, bg_x1, bg_y1))
-    bg_cropped.putalpha(bg_opacity)
 
-    result = Image.new(cropped.mode, bg_cropped.size, (255, 255, 255))
-    result.paste(bg_cropped, (0, 0), bg_cropped)
+    result = Image.new(cropped.mode, (bg_width, bg_height), (255, 255, 255))
+    if bg_opacity > 0:
+        bg_cropped = img.crop((bg_x0, bg_y0, bg_x1, bg_y1))
+        bg_cropped.putalpha(bg_opacity)
+        result.paste(bg_cropped, (0, 0), bg_cropped)
     result.paste(cropped, (int(x0 - bg_x0), int(y0 - bg_y0)))
 
     if resize is not None:
@@ -337,12 +339,11 @@ class DeepScores:
 
         self.cat_infos = {int(k): v for k, v in data['categories'].items()}
 
+        print(f"basic info loaded in {time() - start_time:.6f}s..")
+        # -- end of load once --
         cat_instance_count = dict()
         for cat in self.get_cats():
             cat_instance_count.setdefault(cat, 0)
-
-        print(f"basic info loaded in {time() - start_time:.6f}s..")
-        # -- end of load once --
 
         self.img_infos = []
 
@@ -671,7 +672,7 @@ class DeepScores:
 
             out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:08d}') + '.png'
             bbox = self.moderate_bbox(ann['a_bbox'], img.size)
-            executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp, debug)
+            executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp)
         return
 
     def crop_image_objects_dense(self, img, ann_info, class_counter, out_dir, bg_opacity=0, min_dim=150, resize=None):
@@ -691,6 +692,7 @@ class DeepScores:
 
         return class_counter
 
+
     def crop_all_to_instances(self,
                               out_dir=None,
                               annotation_set=None,
@@ -708,10 +710,7 @@ class DeepScores:
             for cat in self.get_cats():
                 cat_inst_ctr.setdefault(cat, 0)
 
-        if annotation_set is None:
-            self.chosen_ann_set = self.annotation_sets[0]
-        else:
-            self.chosen_ann_set = self.chosen_ann_set[annotation_set]
+        self.chosen_ann_set = self.annotation_sets[0 if annotation_set is None else annotation_set]
 
         print("initiate cropping...")
         start_time = time()
@@ -734,7 +733,7 @@ class DeepScores:
             print(f'done t={time() - start_time:.6f}s')
         elif self.dataset_type == 'dense':
             skip = False
-            prog_file = sav if sav is not None else path.join(self.root, 'crop_dense_prog.json')
+            prog_file = path.join(self.root, sav if sav is not None else 'crop_dense_prog.json')
             if cont:
                 if path.isfile(prog_file):
                     skip = True
@@ -760,6 +759,16 @@ class DeepScores:
                 with open(prog_file, 'w') as file:
                     json.dump({'last_file': img_info['filename'], 'cat_inst_ctr': cat_inst_ctr}, file)
             print(f"cats: {cat_inst_ctr}")
+            cat_inst_ctr = sorted(cat_inst_ctr.items(), key=lambda item: item[1], reverse=True)
+
+            self.cat_instance_count = dict()
+            out = dict()
+            for cat, cnt in cat_inst_ctr:
+                self.cat_instance_count[cat] = cnt
+                out[self.cat_infos[cat]['name']] = cnt
+
+            with open("cats.json", 'w') as f:
+                json.dump({'cats': out}, f)
             print(f'done t={time() - start_time:.6f}s')
             # print(f"total annotation {len(annotations)} with {len(cat_inst_ctr)} out of {num_classes} classes")
         return cat_inst_ctr
