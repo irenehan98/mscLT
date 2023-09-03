@@ -161,6 +161,21 @@ def crop_object(img, bbox, min_dim, bg_opacity, resize):
     return result
 
 
+def moderate_bbox(bbox, img_size):
+    x0, y0, x1, y1 = bbox
+    img_width, img_height = img_size
+
+    if x0 == x1:
+        x0 = max(0, x0 - 1)
+        x1 = min(img_width, x1 + 1)
+    if y0 == y1:
+        y0 = max(0, y0 - 1)
+        y1 = min(img_height, y1 + 1)
+
+    return [x0, y0, x1, y1]
+
+
+
 class DeepScores:
     def __init__(self, root_dir, dataset_type):
         print("initializing...")
@@ -239,20 +254,6 @@ class DeepScores:
         return parsed_dict
 
     @staticmethod
-    def moderate_bbox(bbox, img_size):
-        x0, y0, x1, y1 = bbox
-        img_width, img_height = img_size
-
-        if x0 == x1:
-            x0 = max(0, x0 - 1)
-            x1 = min(img_width, x1 + 1)
-        if y0 == y1:
-            y0 = max(0, y0 - 1)
-            y1 = min(img_height, y1 + 1)
-
-        return [x0, y0, x1, y1]
-
-    @staticmethod
     def combine_cat_inst_cnt(inst_cnt, more_cnt):
         # WARNING: unknown categories in muscima++ has None as key values
         for k, v in more_cnt.items():
@@ -312,6 +313,13 @@ class DeepScores:
         result.save(out_fp)
         return result
 
+    def generate_img_name(self, name, inst_cnt):
+        if self.dataset_type == 'dense':
+            return f"{name}-{inst_cnt:06d}.png"
+        else:
+            return f"{name}-{inst_cnt:08d}.png"
+
+
     def load_annotations(self, annotation_set_filter=None, load_all=True):
         print("loading annotations...")
         start_time = time()
@@ -341,9 +349,7 @@ class DeepScores:
 
         print(f"basic info loaded in {time() - start_time:.6f}s..")
         # -- end of load once --
-        cat_instance_count = dict()
-        for cat in self.get_cats():
-            cat_instance_count.setdefault(cat, 0)
+        cat_instance_count = self.gen_inst_ctr()
 
         self.img_infos = []
 
@@ -376,6 +382,12 @@ class DeepScores:
         print("--- ANNOTATION INFO ---")
 
         print("loading annotations done in {:.2f}s".format(time() - start_time))
+
+    def gen_inst_ctr(self):
+        cat_instance_count = dict()
+        for cat in self.get_cats():
+            cat_instance_count.setdefault(cat, 0)
+        return cat_instance_count
 
     def generate_annotations(self):
         start = time()
@@ -671,7 +683,7 @@ class DeepScores:
             class_counter[cat_id] += 1
 
             out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:08d}') + '.png'
-            bbox = self.moderate_bbox(ann['a_bbox'], img.size)
+            bbox = moderate_bbox(ann['a_bbox'], img.size)
             executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp)
         return
 
@@ -685,7 +697,7 @@ class DeepScores:
                 class_counter.setdefault(cat_id, 0)
                 class_counter[cat_id] += 1
 
-                bbox = self.moderate_bbox(ann['a_bbox'], img.size)
+                bbox = moderate_bbox(ann['a_bbox'], img.size)
                 out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:06d}') + '.png'
 
                 executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp)
@@ -706,9 +718,7 @@ class DeepScores:
             os.mkdir(out_dir)
 
         if cat_inst_ctr is None:
-            cat_inst_ctr = dict()
-            for cat in self.get_cats():
-                cat_inst_ctr.setdefault(cat, 0)
+            cat_inst_ctr = self.gen_inst_ctr()
 
         self.chosen_ann_set = self.annotation_sets[0 if annotation_set is None else annotation_set]
 
