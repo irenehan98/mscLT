@@ -47,20 +47,20 @@ class DeepScores:
         self.dataset_type = DeepScoresType.from_str(dataset_type)
         self.home_dir = path.join(root_dir, 'ds2_' + self.dataset_type.value)
 
-        self.train_ann_files = []
-        self.test_ann_files = []
+        self.train_ann_fps = []
+        self.test_ann_fps = []
         if dataset_type == DeepScoresType.DENSE:
-            self.train_ann_files.append(path.join(root_dir, "deepscores_train.json"))  # default ann_file
-            self.test_ann_files.append(path.join(root_dir, "deepscores_test.json"))
+            self.train_ann_fps.append(path.join(root_dir, "deepscores_train.json"))  # default ann_file
+            self.test_ann_fps.append(path.join(root_dir, "deepscores_test.json"))
         elif dataset_type == DeepScoresType.COMPLETE:
             for i in itertools.count():
                 test_fp = path.join(root_dir, f"deepscores-complete-{i}_test.json")
                 train_fp = path.join(root_dir, f"deepscores-complete-{i}_train.json")
 
                 if path.isfile(train_fp):
-                    self.train_ann_files.append(train_fp)
+                    self.train_ann_fps.append(train_fp)
                 if path.isfile(test_fp):
-                    self.test_ann_files.append(test_fp)
+                    self.test_ann_fps.append(test_fp)
 
                 if not path.isfile(train_fp) and not path.isfile(test_fp):
                     break
@@ -196,10 +196,10 @@ class DeepScores:
         start_time = time()
 
         # -- only need to load once --
-        ref_file = self.test_ann_files[0]
+        ref_fp = self.test_ann_fps[0]
 
-        with open(ref_file, 'r') as ann_file:
-            data = json.load(ann_file)
+        with open(ref_fp, 'r') as ann_fp:
+            data = json.load(ann_fp)
 
         self.dataset_info = data['info']
         self.annotation_sets = data['annotation_sets']
@@ -227,10 +227,10 @@ class DeepScores:
         # press F for my 32gb ram it ain't enough for multithreading
         if load_all:
             with_ann_df = True if self.dataset_type == DeepScoresType.DENSE else False
-            files = self.train_ann_files + self.test_ann_files
+            fps = self.train_ann_fps + self.test_ann_fps
             ann_infos = []
-            for ann_file in tqdm(files, 'file processed: ', unit='file'):
-                img_infos, img_idx_lookup, new_inst_cnt, ann_df = self.load_annotation_file(ann_file, cat_idx,
+            for ann_fp in tqdm(fps, 'file processed: ', unit='file'):
+                img_infos, img_idx_lookup, new_inst_cnt, ann_df = self.load_annotation_file(ann_fp, cat_idx,
                                                                                             with_ann_df)
                 self.img_idx_lookup.update(img_idx_lookup)
                 cat_instance_count = self.combine_cat_inst_cnt(cat_instance_count, new_inst_cnt)
@@ -238,7 +238,7 @@ class DeepScores:
                 ann_infos.append(ann_df)
             self.ann_infos = pandas.concat(ann_infos)
         elif self.dataset_type == DeepScoresType.DENSE:
-            img_infos, img_idx_lookup, new_inst_cnt, ann_df = self.load_annotation_file(ref_file, cat_idx)
+            img_infos, img_idx_lookup, new_inst_cnt, ann_df = self.load_annotation_file(ref_fp, cat_idx)
             self.img_idx_lookup.update(img_idx_lookup)
             cat_instance_count = self.combine_cat_inst_cnt(cat_instance_count, new_inst_cnt)
             self.img_infos.extend(img_infos)
@@ -268,15 +268,15 @@ class DeepScores:
 
     def check_overlap_train_test(self):
         train_imgs = set()
-        for ann_file in tqdm(self.train_ann_files, 'train file checked: ', unit='file'):
-            with open(ann_file, 'r') as file:
+        for ann_fp in tqdm(self.train_ann_fps, 'train file checked: ', unit='file'):
+            with open(ann_fp, 'r') as file:
                 data = json.load(file)
             img_fps = [img_info['filename'] for img_info in data['images']]
             train_imgs.update(img_fps)
 
         test_imgs = set()
-        for ann_file in tqdm(self.test_ann_files, 'test file checked: ', unit='file'):
-            with open(ann_file, 'r') as file:
+        for ann_fp in tqdm(self.test_ann_fps, 'test file checked: ', unit='file'):
+            with open(ann_fp, 'r') as file:
                 data = json.load(file)
             img_fps = [img_info['filename'] for img_info in data['images']]
             test_imgs.update(img_fps)
@@ -573,7 +573,7 @@ class DeepScores:
         start_time = time()
 
         if self.dataset_type == DeepScoresType.COMPLETE:
-            fps = self.train_ann_files + self.test_ann_files
+            fps = self.train_ann_fps + self.test_ann_fps
             cat_idx = self.annotation_sets.index(self.chosen_ann_set)
             for file in tqdm(fps, 'read file', unit='file'):
                 with futures.ThreadPoolExecutor() as executor:
@@ -590,11 +590,11 @@ class DeepScores:
             print(f'done t={time() - start_time:.6f}s')
         elif self.dataset_type == DeepScoresType.DENSE:
             skip = False
-            prog_file = path.join(self.home_dir, sav if sav is not None else 'crop_dense_prog.json')
+            prog_fp = path.join(self.home_dir, sav if sav is not None else 'crop_dense_prog.json')
             if cont:
-                if path.isfile(prog_file):
+                if path.isfile(prog_fp):
                     skip = True
-                    with open(prog_file, 'r') as file:
+                    with open(prog_fp, 'r') as file:
                         data = json.load(file)
                         last_file = data['last_file']
                         for k, cnt in data['cat_inst_ctr'].items():
@@ -614,7 +614,7 @@ class DeepScores:
                 cat_inst_ctr = self.crop_image_objects_dense(img, ann_info, cat_inst_ctr, out_dir, bg_opacity,
                                                              resize=resize)
 
-                with open(prog_file, 'w') as file:
+                with open(prog_fp, 'w') as file:
                     json.dump({'last_file': img_info['filename'], 'cat_inst_ctr': cat_inst_ctr}, file)
             print(f"cats: {cat_inst_ctr}")
             self.assert_crop_success(cat_inst_ctr)
@@ -626,7 +626,7 @@ class DeepScores:
                 self.cat_instance_count[cat] = cnt
                 out[self.cat_infos[cat]['name']] = cnt
 
-            with open("cats.json", 'w') as f:
+            with open(path.join(self.home_dir, "cats.json"), 'w') as f:
                 json.dump({'cats': out}, f)
             print(f'done t={time() - start_time:.6f}s')
             # print(f"total annotation {len(annotations)} with {len(cat_inst_ctr)} out of {num_classes} classes")
