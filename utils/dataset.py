@@ -142,7 +142,7 @@ def crop_object(img, bbox, min_dim, bg_opacity, resize):
     cropped = img.crop((x0, y0, x1, y1))
 
     result = Image.new(cropped.mode, (bg_width, bg_height), (255, 255, 255))
-    if bg_opacity > 0:
+    if bg_opacity and bg_opacity > 0:
         bg_cropped = img.crop((bg_x0, bg_y0, bg_x1, bg_y1))
         bg_cropped.putalpha(bg_opacity)
         result.paste(bg_cropped, (0, 0), bg_cropped)

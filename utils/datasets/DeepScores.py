@@ -1,6 +1,7 @@
 import itertools
 from concurrent import futures
 from datetime import datetime
+from enum import Enum
 from os import mkdir
 from time import time
 from typing import List
@@ -12,6 +13,20 @@ from PIL import ImageDraw, ImageFont, ImageColor
 from tqdm import tqdm
 
 from ..dataset import *
+
+
+class DeepScoresType(Enum):
+    DENSE = 'dense'
+    COMPLETE = 'complete'
+
+    @staticmethod
+    def from_str(label):
+        if label in ('dense', 'DENSE'):
+            return DeepScoresType.DENSE
+        elif label in ('complete', 'COMPLETE'):
+            return DeepScoresType.COMPLETE
+        else:
+            raise NotImplementedError
 
 
 class DeepScores:
@@ -29,17 +44,15 @@ class DeepScores:
         self.img_idx_lookup = dict()  # lookup table used to figure out the index in img_info of image based on their img_id
         # self.ann_ids = []
 
-        self.root = root_dir
-        self.dataset_type = dataset_type
-        # TODO: assert dataset exists
-        self.validate_type(dataset_type)
+        self.dataset_type = DeepScoresType.from_str(dataset_type)
+        self.home_dir = path.join(root_dir, 'ds2_' + self.dataset_type.value)
 
         self.train_ann_files = []
         self.test_ann_files = []
-        if dataset_type == 'dense':
+        if dataset_type == DeepScoresType.DENSE:
             self.train_ann_files.append(path.join(root_dir, "deepscores_train.json"))  # default ann_file
             self.test_ann_files.append(path.join(root_dir, "deepscores_test.json"))
-        elif dataset_type == 'complete':
+        elif dataset_type == DeepScoresType.COMPLETE:
             for i in itertools.count():
                 test_fp = path.join(root_dir, f"deepscores-complete-{i}_test.json")
                 train_fp = path.join(root_dir, f"deepscores-complete-{i}_train.json")
@@ -56,11 +69,11 @@ class DeepScores:
 
     def __repr__(self):
         information = "DeepScore Dataset Annotation\n"
-        information += f"root file: {self.root}\n"
+        information += f"root file: {self.home_dir}\n"
         information += f"dataset type: {self.dataset_type}\n"
         if self.dataset_info is not None:
             information += f"Num images: {len(self.img_infos)}\n"
-            information += f"Num anns: {len(self.ann_infos) if self.dataset_type == 'dense' else '-'}\n"
+            information += f"Num anns: {len(self.ann_infos) if self.dataset_type == DeepScoresType.DENSE else '-'}\n"
             information += f"Num cats: {len(self.cat_infos)}\n"
             information += f"cat insts: {self.cat_instance_count}\n"
             information += f"selected cats: {len(self.get_cats())}"
@@ -84,10 +97,6 @@ class DeepScores:
         return cat_instance_count
 
     @staticmethod
-    def validate_type(dataset_type):
-        assert dataset_type == 'dense' or dataset_type == 'complete', f"unsupported type: {dataset_type}"
-
-    @staticmethod
     def parse_comments(comment):
         parsed_dict = dict()
         for co in comment.split(";"):
@@ -102,6 +111,10 @@ class DeepScores:
         for k, v in more_cnt.items():
             inst_cnt[int(k)] += v
         return inst_cnt
+
+    @staticmethod
+    def count_empty_cat_cnt(cat_instances):
+        return sum([1 if cnt == 0 else 0 for _, cnt in cat_instances])
 
     @staticmethod
     def load_annotation_file(ann_fp, cat_idx, with_ann_df=True):
@@ -156,8 +169,24 @@ class DeepScores:
         result.save(out_fp)
         return result
 
+    @staticmethod
+    def remap_empty_cat_id(anns, new_mapping):
+        print("remapping...")
+        start_time = time()
+
+        remap_cnt = 0
+        for ann in anns:
+            cat_id = ann['category_id']
+            if cat_id in new_mapping:
+                # print(f"remapping {cat_id} to {new_mapping[cat_id]}")
+                ann['category_id'] = new_mapping[cat_id]
+                remap_cnt += 1
+
+        print(f"remapped {remap_cnt} annotations in t={time() - start_time:.6f}s")
+        return new_mapping, anns
+
     def generate_img_name(self, name, inst_cnt):
-        if self.dataset_type == 'dense':
+        if self.dataset_type == DeepScoresType.DENSE:
             return f"{name}-{inst_cnt:06d}.png"
         else:
             return f"{name}-{inst_cnt:08d}.png"
@@ -197,7 +226,7 @@ class DeepScores:
 
         # press F for my 32gb ram it ain't enough for multithreading
         if load_all:
-            with_ann_df = True if self.dataset_type == 'dense' else False
+            with_ann_df = True if self.dataset_type == DeepScoresType.DENSE else False
             files = self.train_ann_files + self.test_ann_files
             ann_infos = []
             for ann_file in tqdm(files, 'file processed: ', unit='file'):
@@ -208,7 +237,7 @@ class DeepScores:
                 self.img_infos.extend(img_infos)
                 ann_infos.append(ann_df)
             self.ann_infos = pandas.concat(ann_infos)
-        elif self.dataset_type == 'dense':
+        elif self.dataset_type == DeepScoresType.DENSE:
             img_infos, img_idx_lookup, new_inst_cnt, ann_df = self.load_annotation_file(ref_file, cat_idx)
             self.img_idx_lookup.update(img_idx_lookup)
             cat_instance_count = self.combine_cat_inst_cnt(cat_instance_count, new_inst_cnt)
@@ -230,10 +259,11 @@ class DeepScores:
         print("generating annotations...")
         cat_instances = self.cat_instance_count.items()
         print(cat_instances)
-        cat_with_inst_cnt = sum([1 if cnt > 0 else 0 for _, cnt in cat_instances])
-        new_mapping = self.get_new_mapping(self.cat_instance_count) if cat_with_inst_cnt < len(cat_instances) else None
+        # TODO can bug if model requires cat to start at 0 (DeepScores starts at 1)
+        empty_cat_cnt = self.count_empty_cat_cnt(cat_instances)
+        new_mapping = self.get_new_mapping(self.cat_instance_count) if empty_cat_cnt > 0 else None
 
-        generate_all_annotations(cat_instances, self.cat_infos, self.root, new_mapping=new_mapping)
+        generate_all_annotations(cat_instances, self.cat_infos, self.home_dir, new_mapping=new_mapping)
         print(f"done generating annotations in {time() - start:.6f}s")
 
     def check_overlap_train_test(self):
@@ -335,8 +365,7 @@ class DeepScores:
 
         if oriented:
             bbox = ann['o_bbox']
-            draw.line(bbox + bbox[:2], fill=color, width=3
-                      )
+            draw.line(bbox + bbox[:2], fill=color, width=3)
         else:
             bbox = ann['a_bbox']
             draw.rectangle(bbox, outline=color, width=2)
@@ -397,9 +426,9 @@ class DeepScores:
                               self.get_img_ann_pair(self.ann_infos,
                                                     idxs=img_idx, ids=img_id)]
 
-        img_dir = path.join(self.root, 'images')
-        seg_dir = path.join(self.root, 'segmentation')
-        inst_dir = path.join(self.root, 'instance')
+        img_dir = path.join(self.home_dir, 'images')
+        seg_dir = path.join(self.home_dir, 'segmentation')
+        inst_dir = path.join(self.home_dir, 'instance')
 
         # Get the actual image filepath and the segmentation filepath
         img_fp = path.join(img_dir, img_info['filename'])
@@ -458,23 +487,9 @@ class DeepScores:
             img.save(path.join(out_dir, datetime.now().strftime('%m-%d_%H%M%S'))
                      + '.png')
 
+    # TODO
     # def visualize_categories(self):
     #     self.cat_info
-
-    def remap_empty_cat_id(self, anns, new_mapping):
-        print("remapping...")
-        start_time = time()
-
-        remap_cnt = 0
-        for ann in anns:
-            cat_id = ann['category_id']
-            if cat_id in new_mapping:
-                # print(f"remapping {cat_id} to {new_mapping[cat_id]}")
-                ann['category_id'] = new_mapping[cat_id]
-                remap_cnt += 1
-
-        print(f"remapped {remap_cnt} annotations in t={time() - start_time:.6f}s")
-        return new_mapping, anns
 
     def get_new_mapping(self, cat_instances, starts_from=0):
         new_mapping = dict()
@@ -487,7 +502,7 @@ class DeepScores:
             if i == cat_len:
                 print(f"i reached cat_len {i, cat_len}.")
                 if i not in cat_instances or cat_instances[i] == 0:
-                    print(f"hey! class id {i} is empty too!")
+                    print(f"hej class id {i} is empty too")
                     cat_len -= 1
                 break
 
@@ -495,7 +510,7 @@ class DeepScores:
                 while cat_len not in cat_instances or cat_instances[cat_len] == 0:
                     cat_len -= 1
                     if cat_len <= i:
-                        print(f"cat len {cat_len} reached i ({i})!")
+                        print(f"cat len {cat_len} reached i ({i})")
                         break
                 new_mapping[cat_len] = i
                 cat_len -= 1
@@ -508,7 +523,7 @@ class DeepScores:
                                     ann_info,
                                     class_counter,
                                     out_dir,
-                                    bg_opacity=0,
+                                    bg_opacity=None,
                                     min_dim=150,
                                     resize=None):
         # split the gt bounding boxes onto the image
@@ -522,7 +537,7 @@ class DeepScores:
             executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp)
         return
 
-    def crop_image_objects_dense(self, img, ann_info, class_counter, out_dir, bg_opacity=0, min_dim=150, resize=None):
+    def crop_image_objects_dense(self, img, ann_info, class_counter, out_dir, bg_opacity=None, min_dim=150, resize=None):
         # split the gt bounding boxes onto the image
         with futures.ThreadPoolExecutor() as executor:
             for ann in ann_info.to_dict('records'):
@@ -541,24 +556,23 @@ class DeepScores:
     def crop_all_to_instances(self,
                               out_dir=None,
                               annotation_set=None,
-                              bg_opacity=0,
+                              bg_opacity=None,
                               resize=None,
-                              cat_inst_ctr=None,
                               cont=True,
                               sav=None):
         assert out_dir is not None, "out_dir can't be empty"
         if not path.exists(out_dir):
             mkdir(out_dir)
 
-        if cat_inst_ctr is None:
-            cat_inst_ctr = self._gen_inst_ctr()
+        cat_inst_ctr = self._gen_inst_ctr()
 
+        # defaults DeepScores
         self.chosen_ann_set = self.annotation_sets[0 if annotation_set is None else annotation_set]
 
         print("initiate cropping...")
         start_time = time()
 
-        if self.dataset_type == 'complete':
+        if self.dataset_type == DeepScoresType.COMPLETE:
             fps = self.train_ann_files + self.test_ann_files
             cat_idx = self.annotation_sets.index(self.chosen_ann_set)
             for file in tqdm(fps, 'read file', unit='file'):
@@ -567,16 +581,16 @@ class DeepScores:
                     for img_info in tqdm(img_infos, 'queued imgs', unit='img'):
                         # for img_info in img_infos:
                         _, ann_info = [i[0] for i in self.get_img_ann_pair(ann_df, img_infos=[img_info])]
-                        img_fp = path.join(self.root, 'images', img_info['filename'])
+                        img_fp = path.join(self.home_dir, 'images', img_info['filename'])
                         img = Image.open(img_fp)
 
                         self.crop_image_objects_complete(executor, img, ann_info, cat_inst_ctr, out_dir, bg_opacity,
                                                          resize=resize)
                     cat_inst_ctr = self.combine_cat_inst_cnt(cat_inst_ctr, new_inst_cnt)
             print(f'done t={time() - start_time:.6f}s')
-        elif self.dataset_type == 'dense':
+        elif self.dataset_type == DeepScoresType.DENSE:
             skip = False
-            prog_file = path.join(self.root, sav if sav is not None else 'crop_dense_prog.json')
+            prog_file = path.join(self.home_dir, sav if sav is not None else 'crop_dense_prog.json')
             if cont:
                 if path.isfile(prog_file):
                     skip = True
@@ -593,7 +607,7 @@ class DeepScores:
                         skip = False
                     continue
 
-                img_fp = path.join(self.root, 'images', img_info['filename'])
+                img_fp = path.join(self.home_dir, 'images', img_info['filename'])
                 _, ann_info = [i[0] for i in self.get_img_ann_pair(self.ann_infos, img_infos=[img_info])]
                 img = Image.open(img_fp)
 
@@ -619,11 +633,11 @@ class DeepScores:
         return cat_inst_ctr
 
     def assert_crop_success(self, cat_instances):
-        not_found = dict()
+        not_found = self._gen_inst_ctr()
 
         for cat, cnt in cat_instances.items():
             for i in range(1, cnt + 1):
                 name = self.cat_infos[cat]['name']
-                if not path.isfile(path.join(self.root, 'cropped', self.generate_img_name(name, cnt))):
+                if not path.isfile(path.join(self.home_dir, 'cropped', self.generate_img_name(name, cnt))):
                     not_found[cat] += 1
 
