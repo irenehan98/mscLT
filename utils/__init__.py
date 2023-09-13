@@ -1,2 +1,2 @@
-from dataset import *
-from utils.datasets.DeepScores import DeepScores
+from .dataset import *
+from .datasets.DeepScores import DeepScores

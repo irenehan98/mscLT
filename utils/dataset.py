@@ -5,6 +5,7 @@ import json
 import math
 import random
 from os import path
+from time import time
 
 from PIL import Image
 
@@ -58,7 +59,7 @@ def generate_train_annotations(cat_instances, excl_sets, cat_info, new_mapping, 
             # WARNING: quick implementation only, use your own params!
             width, height = (150, 150)
             # WARNING: len depends on dataset_type
-            img_fp = path.join(img_dir, f'{name}-{idx:06d}') + '.png'
+            img_fp = path.join(img_dir, f'{name}-{idx:08d}') + '.png'
             if style == 'bbn':
                 annotations.append(new_bbn_ann_inst(cat_id, current_id, height, img_fp, width))
             current_id += 1
@@ -67,9 +68,8 @@ def generate_train_annotations(cat_instances, excl_sets, cat_info, new_mapping, 
     return
 
 
-def generate_annotation(idx_sets, cat_info, new_mapping, home_dir, filename, current_id, style):
+def generate_annotation(idx_sets, cat_info, new_mapping, img_dir, filename, current_id, style):
     print(f"generating {filename}..")
-    img_dir = path.join(home_dir, 'cropped')
     annotations = []
     for cat, idx_set in idx_sets:
         name = cat_info[cat]['name']
@@ -92,7 +92,7 @@ def generate_annotation(idx_sets, cat_info, new_mapping, home_dir, filename, cur
     for ann in annotations:
         if ann['category_id'] in new_mapping:
             ann['category_id'] = new_mapping[ann['category_id']]
-    with open(path.join(home_dir, filename), 'w') as fp:
+    with open(path.join(img_dir, filename), 'w') as fp:
         json.dump({'annotations': annotations, 'num_classes': len(idx_sets), "remapped_cats": new_mapping}, fp)
     return current_id
 
@@ -114,18 +114,33 @@ def generate_test_val_set(cat_instances, test_coef, val_coef):
 
 
 # TODO get max decimal len
-def generate_all_annotations(cat_instances, cat_info, home_dir, style='bbn', new_mapping=None):
+def generate_all_annotations(cat_instances, cat_info, img_dir, style='bbn', new_mapping=None):
     test_set, val_set = generate_test_val_set(cat_instances, 0.2, 0.2)
 
     current_id = 1
-    current_id = generate_annotation(test_set.items(), cat_info, new_mapping, home_dir, 'test.json', current_id, style)
-    current_id = generate_annotation(val_set.items(), cat_info, new_mapping, home_dir, 'val.json', current_id, style)
+    current_id = generate_annotation(test_set.items(), cat_info, new_mapping, img_dir, 'test.json', current_id, style)
+    current_id = generate_annotation(val_set.items(), cat_info, new_mapping, img_dir, 'val.json', current_id, style)
 
     combined_set = test_set
     for k, v in val_set.items():
         combined_set[k].update(v)
-    generate_train_annotations(cat_instances, combined_set, cat_info, new_mapping, home_dir, 'train.json', current_id, style)
+    generate_train_annotations(cat_instances, combined_set, cat_info, new_mapping, img_dir, 'train.json', current_id, style)
     return
+
+
+def convert_bbn_to_ride(home_dir, json_f, txt):
+    print(f"converting {json_f}")
+    start = time()
+    with open(path.join(home_dir, json_f), 'r') as ann_file:
+        annotations = json.load(ann_file)['annotations']
+    f = ""
+    for ann in annotations:
+        img_path = ann['fpath']
+        label = ann['category_id']
+        f += f"{img_path} {label}\n"
+    with open(path.join(home_dir, txt), 'w') as fp:
+        fp.write(f)
+    print(f"convert to {txt} done: {time() - start:.6f}s")
 
 
 # TODO rename to crop_with_bg

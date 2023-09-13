@@ -30,7 +30,7 @@ class DeepScoresType(Enum):
 
 
 class DeepScores:
-    def __init__(self, root_dir, dataset_type):
+    def __init__(self, root_dir, dataset_type, out_dir=None):
         print("initializing...")
         start_time = time()
 
@@ -46,16 +46,19 @@ class DeepScores:
 
         self.dataset_type = DeepScoresType.from_str(dataset_type)
         self.home_dir = path.join(root_dir, 'ds2_' + self.dataset_type.value)
+        self.out_dir = out_dir if out_dir is not None else self.home_dir
 
         self.train_ann_fps = []
         self.test_ann_fps = []
-        if dataset_type == DeepScoresType.DENSE:
-            self.train_ann_fps.append(path.join(root_dir, "deepscores_train.json"))  # default ann_file
-            self.test_ann_fps.append(path.join(root_dir, "deepscores_test.json"))
-        elif dataset_type == DeepScoresType.COMPLETE:
+        if self.dataset_type == DeepScoresType.DENSE:
+            self.img_base = '{}-{:06d}.png'
+            self.train_ann_fps.append(path.join(self.home_dir, "deepscores_train.json"))  # default ann_file
+            self.test_ann_fps.append(path.join(self.home_dir, "deepscores_test.json"))
+        elif self.dataset_type == DeepScoresType.COMPLETE:
+            self.img_base = '{}-{:08d}.png'
             for i in itertools.count():
-                test_fp = path.join(root_dir, f"deepscores-complete-{i}_test.json")
-                train_fp = path.join(root_dir, f"deepscores-complete-{i}_train.json")
+                test_fp = path.join(self.home_dir, f"deepscores-complete-{i}_test.json")
+                train_fp = path.join(self.home_dir, f"deepscores-complete-{i}_train.json")
 
                 if path.isfile(train_fp):
                     self.train_ann_fps.append(train_fp)
@@ -186,10 +189,7 @@ class DeepScores:
         return new_mapping, anns
 
     def generate_img_name(self, name, inst_cnt):
-        if self.dataset_type == DeepScoresType.DENSE:
-            return f"{name}-{inst_cnt:06d}.png"
-        else:
-            return f"{name}-{inst_cnt:08d}.png"
+        return self.img_base.format(name, inst_cnt)
 
     def load_annotations(self, annotation_set_filter=None, load_all=True):
         print("loading annotations...")
@@ -254,16 +254,19 @@ class DeepScores:
 
         print("loading annotations done in {:.2f}s".format(time() - start_time))
 
-    def generate_annotations(self):
+    def generate_annotations(self, img_dir):
         start = time()
         print("generating annotations...")
+        img_dir = path.join(self.out_dir, img_dir)
+        assert path.isdir(img_dir), f"path {img_dir} does not exist"
+
         cat_instances = self.cat_instance_count.items()
         print(cat_instances)
         # TODO can bug if model requires cat to start at 0 (DeepScores starts at 1)
         empty_cat_cnt = self.count_empty_cat_cnt(cat_instances)
         new_mapping = self.get_new_mapping(self.cat_instance_count) if empty_cat_cnt > 0 else None
 
-        generate_all_annotations(cat_instances, self.cat_infos, self.home_dir, new_mapping=new_mapping)
+        generate_all_annotations(cat_instances, self.cat_infos, img_dir, new_mapping=new_mapping)
         print(f"done generating annotations in {time() - start:.6f}s")
 
     def check_overlap_train_test(self):
@@ -517,7 +520,7 @@ class DeepScores:
         print(f"new mapping: {new_mapping}")
         return new_mapping
 
-    def crop_image_objects_complete(self,
+    def crop_image_objects_threaded(self,
                                     executor,
                                     img,
                                     ann_info,
@@ -532,37 +535,38 @@ class DeepScores:
             name = self.cat_infos[cat_id]['name']
             class_counter[cat_id] += 1
 
-            out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:08d}') + '.png'
+            out_fp = path.join(out_dir, self.generate_img_name(name, class_counter[cat_id]))
             bbox = moderate_bbox(ann['a_bbox'], img.size)
             executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp)
         return
 
-    def crop_image_objects_dense(self, img, ann_info, class_counter, out_dir, bg_opacity=None, min_dim=150, resize=None):
+    def crop_image_objects(self, img, ann_info, class_counter, out_dir, bg_opacity=None, min_dim=150, resize=None):
         # split the gt bounding boxes onto the image
-        with futures.ThreadPoolExecutor() as executor:
-            for ann in ann_info.to_dict('records'):
-                cat_id = ann['cat_id'][0]
-                name = self.cat_infos[cat_id]['name']
-                class_counter.setdefault(cat_id, 0)
-                class_counter[cat_id] += 1
+        for ann in ann_info.to_dict('records'):
+            cat_id = ann['cat_id'][0]
+            name = self.cat_infos[cat_id]['name']
+            class_counter.setdefault(cat_id, 0)
+            class_counter[cat_id] += 1
 
-                bbox = moderate_bbox(ann['a_bbox'], img.size)
-                out_fp = path.join(out_dir, f'{name}-{class_counter[cat_id]:06d}') + '.png'
+            bbox = moderate_bbox(ann['a_bbox'], img.size)
+            out_fp = path.join(out_dir, self.generate_img_name(name, class_counter[cat_id]))
 
-                executor.submit(self.crop_save_obj_img, img, bbox, resize, min_dim, bg_opacity, out_fp)
+            self.crop_save_obj_img(img, bbox, resize, min_dim, bg_opacity, out_fp)
 
         return class_counter
 
     def crop_all_to_instances(self,
-                              out_dir=None,
+                              out_dir,
                               annotation_set=None,
                               bg_opacity=None,
                               resize=None,
                               cont=True,
                               sav=None):
         assert out_dir is not None, "out_dir can't be empty"
-        if not path.exists(out_dir):
-            mkdir(out_dir)
+        crop_out = path.join(self.out_dir, out_dir)
+        if not path.exists(crop_out):
+            mkdir(crop_out)
+        self.crop_out = crop_out
 
         cat_inst_ctr = self._gen_inst_ctr()
 
@@ -572,72 +576,60 @@ class DeepScores:
         print("initiate cropping...")
         start_time = time()
 
-        if self.dataset_type == DeepScoresType.COMPLETE:
-            fps = self.train_ann_fps + self.test_ann_fps
-            cat_idx = self.annotation_sets.index(self.chosen_ann_set)
-            for file in tqdm(fps, 'read file', unit='file'):
-                with futures.ThreadPoolExecutor() as executor:
-                    img_infos, _, new_inst_cnt, ann_df = self.load_annotation_file(file, cat_idx)
-                    for img_info in tqdm(img_infos, 'queued imgs', unit='img'):
-                        # for img_info in img_infos:
-                        _, ann_info = [i[0] for i in self.get_img_ann_pair(ann_df, img_infos=[img_info])]
-                        img_fp = path.join(self.home_dir, 'images', img_info['filename'])
-                        img = Image.open(img_fp)
+        skip = False
+        prog_fp = path.join(self.home_dir, sav if sav is not None else 'crop_prog.json')
+        if cont and path.isfile(prog_fp):
+            skip = True
+            with open(prog_fp, 'r') as file:
+                data = json.load(file)
+                last_file = data['last_file']
+                for k, cnt in data['cat_inst_ctr'].items():
+                    cat_inst_ctr[int(k)] = cnt
+                print(f"cat_inst_cnt: {cat_inst_ctr}")
+                print("continuing..")
 
-                        self.crop_image_objects_complete(executor, img, ann_info, cat_inst_ctr, out_dir, bg_opacity,
-                                                         resize=resize)
-                    cat_inst_ctr = self.combine_cat_inst_cnt(cat_inst_ctr, new_inst_cnt)
-            print(f'done t={time() - start_time:.6f}s')
-        elif self.dataset_type == DeepScoresType.DENSE:
-            skip = False
-            prog_fp = path.join(self.home_dir, sav if sav is not None else 'crop_dense_prog.json')
-            if cont:
-                if path.isfile(prog_fp):
-                    skip = True
-                    with open(prog_fp, 'r') as file:
-                        data = json.load(file)
-                        last_file = data['last_file']
-                        for k, cnt in data['cat_inst_ctr'].items():
-                            cat_inst_ctr[int(k)] = cnt
-                        print(f"cat_inst_cnt: {cat_inst_ctr}")
-                        print("continuing..")
-            for img_info in tqdm(self.img_infos, desc='progress', unit='img'):
+        fps = self.train_ann_fps + self.test_ann_fps
+        cat_idx = self.annotation_sets.index(self.chosen_ann_set)
+        for file in tqdm(fps, 'read file', unit='file'):
+            img_infos, _, new_inst_cnt, ann_df = self.load_annotation_file(file, cat_idx)
+            for img_info in tqdm(img_infos, 'progress', unit='img'):
                 if skip:
                     if img_info['filename'] == last_file:
                         skip = False
                     continue
 
+                _, ann_info = [i[0] for i in self.get_img_ann_pair(ann_df, img_infos=[img_info])]
                 img_fp = path.join(self.home_dir, 'images', img_info['filename'])
-                _, ann_info = [i[0] for i in self.get_img_ann_pair(self.ann_infos, img_infos=[img_info])]
                 img = Image.open(img_fp)
 
-                cat_inst_ctr = self.crop_image_objects_dense(img, ann_info, cat_inst_ctr, out_dir, bg_opacity,
-                                                             resize=resize)
-
+                cat_inst_ctr = self.crop_image_objects(img, ann_info, cat_inst_ctr, crop_out, bg_opacity,
+                                                       resize=resize)
                 with open(prog_fp, 'w') as file:
                     json.dump({'last_file': img_info['filename'], 'cat_inst_ctr': cat_inst_ctr}, file)
-            print(f"cats: {cat_inst_ctr}")
-            self.assert_crop_success(cat_inst_ctr)
-            cat_inst_ctr = sorted(cat_inst_ctr.items(), key=lambda item: item[1], reverse=True)
 
-            self.cat_instance_count = dict()
-            out = dict()
-            for cat, cnt in cat_inst_ctr:
-                self.cat_instance_count[cat] = cnt
-                out[self.cat_infos[cat]['name']] = cnt
+        self.assert_crop_success(out_dir, cat_inst_ctr)
 
-            with open(path.join(self.home_dir, "cats.json"), 'w') as f:
-                json.dump({'cats': out}, f)
-            print(f'done t={time() - start_time:.6f}s')
-            # print(f"total annotation {len(annotations)} with {len(cat_inst_ctr)} out of {num_classes} classes")
-        return cat_inst_ctr
+        self.cat_instance_count = dict()
+        crop_file = dict()
+        for cat, cnt in sorted(cat_inst_ctr.items(), key=lambda item: item[1], reverse=True):
+            self.cat_instance_count[cat] = cnt
+            crop_file[self.cat_infos[cat]['name']] = cnt
 
-    def assert_crop_success(self, cat_instances):
+        with open(path.join(self.home_dir, "cats.json"), 'w') as f:
+            json.dump({'cats': crop_file}, f)
+        print(f'done t={time() - start_time:.6f}s')
+        # print(f"total annotation {len(annotations)} with {len(cat_inst_ctr)} out of {num_classes} classes")
+        return crop_file, cat_inst_ctr
+
+    def assert_crop_success(self, cat_instances, out_dir):
         not_found = self._gen_inst_ctr()
 
         for cat, cnt in cat_instances.items():
             for i in range(1, cnt + 1):
                 name = self.cat_infos[cat]['name']
-                if not path.isfile(path.join(self.home_dir, 'cropped', self.generate_img_name(name, cnt))):
+                if not path.isfile(path.join(self.out_dir, out_dir, self.generate_img_name(name, cnt))):
                     not_found[cat] += 1
 
+        print(f"non-existing image count: {not_found}")
+        if sum([1 if cnt > 0 else 0 for _, cnt in cat_instances]) > 0:
+            print("there are incomplete crops!")
